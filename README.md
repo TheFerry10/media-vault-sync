@@ -49,11 +49,8 @@ uv run media-vault-sync --config /path/to/config.toml status
 ```
 
 The item path is relative to the selected Inbox. Supported photo/video
-extensions are listed in the pipeline; other files remain untouched. This
-slice uses the file's modification time in the host's local timezone and
-creates `YYYY/YYYY-MM/<timestamp>_<source-hash>_<original-name>`. A different
-item that collides with that name receives a deterministic content-hash suffix.
-Capture time prefers photo `DateTimeOriginal` / `CreateDate` tags and video
+extensions are listed in the pipeline; other files remain untouched. Capture
+time prefers photo `DateTimeOriginal` / `CreateDate` tags and video
 `MediaCreateDate` / `CreateDate` tags. Invalid or missing metadata falls back to
 recognized WhatsApp filename dates and then the file's modification time in the
 host's local timezone. Source timestamps are used as recorded without timezone

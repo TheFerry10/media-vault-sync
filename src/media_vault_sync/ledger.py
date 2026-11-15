@@ -103,9 +103,14 @@ class Ledger:
 def list_items(path: Path) -> list[LedgerItem]:
     db = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
     try:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(items)")}
+        capture_time = "capture_time" if "capture_time" in columns else "NULL"
+        capture_time_source = (
+            "capture_time_source" if "capture_time_source" in columns else "NULL"
+        )
         rows = db.execute(
             "SELECT source_id, destination, staged_path, pending_path, status, error, "
-            "capture_time, capture_time_source "
+            f"{capture_time}, {capture_time_source} "
             "FROM items ORDER BY rowid"
         ).fetchall()
     finally:

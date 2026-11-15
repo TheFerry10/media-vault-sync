@@ -25,7 +25,11 @@ class ExifTool:
             text=True,
         )
         records = json.loads(result.stdout)
-        if not isinstance(records, list) or not records or not isinstance(records[0], dict):
+        if (
+            not isinstance(records, list)
+            or not records
+            or not isinstance(records[0], dict)
+        ):
             raise ValueError("ExifTool returned an invalid metadata response")
         return {
             tag: value

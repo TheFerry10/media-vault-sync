@@ -133,9 +133,7 @@ def capture_time(
 def parse_source_timestamp(value: str) -> datetime | None:
     normalized = value.strip()
     if len(normalized) >= 10 and normalized[4] == ":" and normalized[7] == ":":
-        normalized = (
-            f"{normalized[:4]}-{normalized[5:7]}-{normalized[8:]}"
-        )
+        normalized = f"{normalized[:4]}-{normalized[5:7]}-{normalized[8:]}"
     if len(normalized) > 10 and normalized[10] == " ":
         normalized = f"{normalized[:10]}T{normalized[11:]}"
     try:
