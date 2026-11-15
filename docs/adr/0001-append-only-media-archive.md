@@ -1,0 +1,3 @@
+# Keep the cloud media archive append-only
+
+The automated pipeline will publish media to Azure Files only after uploading it to a separate pending path and verifying its contents; it will never overwrite or delete verified archive media, and path collisions must be verified or assigned a deterministic alternate name. This deliberately rejects destructive mirror semantics so local cleanup and pipeline mistakes cannot remove archived media, while manual changes made through SMB remain outside the guarantee. Protect against accidental deletion with daily Azure Files snapshot-tier recovery points retained for 30 days, and keep the rolling SQLite backup separate from media objects; validate actual Azure costs before provisioning recovery protection.
