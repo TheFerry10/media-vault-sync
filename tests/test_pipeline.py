@@ -2,6 +2,7 @@ import os
 import time
 from collections.abc import Iterator
 from datetime import datetime
+from hashlib import sha256 as hashlib_sha256
 from pathlib import Path
 
 import pytest
@@ -137,7 +138,9 @@ def test_changed_staged_file_is_not_published_or_cleaned(tmp_path: Path) -> None
     )
 
 
-def test_existing_archive_conflict_retains_both_copies(tmp_path: Path) -> None:
+def test_different_content_collision_gets_deterministic_hash_suffix(
+    tmp_path: Path,
+) -> None:
     inbox = tmp_path / "inbox"
     inbox.mkdir()
     media = inbox / "photo.jpg"
@@ -152,12 +155,73 @@ def test_existing_archive_conflict_retains_both_copies(tmp_path: Path) -> None:
     media.write_bytes(b"second")
     os.utime(media, (timestamp, timestamp))
 
-    with pytest.raises(FileExistsError):
-        run_once(Source("Phone-1", inbox), media, tmp_path / "staging", ledger, cloud)
+    second = run_once(
+        Source("Phone-1", inbox), media, tmp_path / "staging", ledger, cloud
+    )
 
     assert cloud.archive[first.destination] == b"first"
-    assert list((tmp_path / "staging").rglob("photo.jpg"))[0].read_bytes() == b"second"
-    assert [item.status for item in list_items(ledger)] == ["published", "failed"]
+    assert cloud.archive[second.destination] == b"second"
+    assert second.destination != first.destination
+    assert second.destination.endswith(f"_{hashlib_sha256(b'second').hexdigest()}.jpg")
+    assert not list((tmp_path / "staging").rglob("photo.jpg"))
+    assert [item.status for item in list_items(ledger)] == ["published", "published"]
+
+
+def test_same_source_reimport_is_removed_after_verified_publication(
+    tmp_path: Path,
+) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    media = inbox / "photo.jpg"
+    media.write_bytes(b"same media")
+    timestamp = datetime(2024, 1, 15, 12).timestamp()
+    os.utime(media, (timestamp, timestamp))
+    cloud = FakeCloud()
+    ledger = tmp_path / "ledger.sqlite"
+    first = run_once(
+        Source("Phone-1", inbox), media, tmp_path / "staging", ledger, cloud
+    )
+
+    media.write_bytes(b"same media")
+    os.utime(media, (timestamp, timestamp))
+    duplicate = run_once(
+        Source("Phone-1", inbox), media, tmp_path / "staging", ledger, cloud
+    )
+
+    assert duplicate.destination == first.destination
+    assert cloud.archive == {first.destination: b"same media"}
+    assert not media.exists()
+    assert not list((tmp_path / "staging").rglob("photo.jpg"))
+    assert [item.status for item in list_items(ledger)] == ["published", "published"]
+
+
+def test_identical_content_from_different_sources_keeps_provenance(
+    tmp_path: Path,
+) -> None:
+    cloud = FakeCloud()
+    ledger = tmp_path / "ledger.sqlite"
+    results = []
+    for source_id in ("Phone-1", "Phone-2"):
+        inbox = tmp_path / source_id
+        inbox.mkdir()
+        media = inbox / "photo.jpg"
+        media.write_bytes(b"shared media")
+        timestamp = datetime(2024, 1, 15, 12).timestamp()
+        os.utime(media, (timestamp, timestamp))
+        results.append(
+            run_once(
+                Source(source_id, inbox),
+                media,
+                tmp_path / "staging",
+                ledger,
+                cloud,
+            )
+        )
+
+    assert results[0].destination != results[1].destination
+    assert len(cloud.archive) == 2
+    assert set(cloud.archive.values()) == {b"shared media"}
+    assert [item.status for item in list_items(ledger)] == ["published", "published"]
 
 
 def test_source_id_stays_stable_when_inbox_moves(tmp_path: Path) -> None:
@@ -180,15 +244,15 @@ def test_source_id_stays_stable_when_inbox_moves(tmp_path: Path) -> None:
     moved.write_bytes(b"second")
     os.utime(moved, (timestamp, timestamp))
 
-    with pytest.raises(FileExistsError):
-        run_once(
-            Source("Phone-1", moved.parent),
-            moved,
-            tmp_path / "staging",
-            tmp_path / "ledger.sqlite",
-            cloud,
-        )
+    second = run_once(
+        Source("Phone-1", moved.parent),
+        moved,
+        tmp_path / "staging",
+        tmp_path / "ledger.sqlite",
+        cloud,
+    )
     assert cloud.archive[first.destination] == b"first"
+    assert cloud.archive[second.destination] == b"second"
 
 
 @pytest.mark.parametrize(
@@ -302,16 +366,14 @@ def test_azure_adapter_publishes_verified_upload_without_replace(
     assert list_items(tmp_path / "ledger.sqlite")[0].status == "published"
     item.write_bytes(b"replacement")
     os.utime(item, (timestamp, timestamp))
-    with pytest.raises(FileExistsError):
-        run_once(
-            Source("Phone-1", inbox),
-            item,
-            tmp_path / "staging",
-            tmp_path / "ledger.sqlite",
-            cloud,
-        )
-    assert (remote / result.destination).read_bytes() == b"actual original"
-    assert (
-        list((tmp_path / "staging").rglob("photo.jpg"))[0].read_bytes()
-        == b"replacement"
+    replacement = run_once(
+        Source("Phone-1", inbox),
+        item,
+        tmp_path / "staging",
+        tmp_path / "ledger.sqlite",
+        cloud,
     )
+    assert (remote / result.destination).read_bytes() == b"actual original"
+    assert (remote / replacement.destination).read_bytes() == b"replacement"
+    assert replacement.destination != result.destination
+    assert not list((tmp_path / "staging").rglob("photo.jpg"))
