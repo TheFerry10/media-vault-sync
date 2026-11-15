@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "media-vault-sync"
+version = "0.1.0"
+description = "Verified append-only media ingestion"
+requires-python = ">=3.11"
+dependencies = [
+    "azure-identity>=1.19,<2",
+    "azure-storage-file-share>=12.20,<13",
+]
+
+[project.optional-dependencies]
+dev = ["mypy>=1.11,<2", "pytest>=8,<9"]
+
+[project.scripts]
+media-vault-sync = "media_vault_sync.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["media_vault_sync*"]
+
+[tool.mypy]
+python_version = "3.11"
+check_untyped_defs = true
