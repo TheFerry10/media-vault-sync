@@ -67,7 +67,9 @@ def test_corrupt_pending_upload_is_not_published_or_cleaned(tmp_path: Path) -> N
         run_once(Source("Phone-1", inbox), media, tmp_path / "staging", ledger, cloud)
 
     assert cloud.archive == {}
-    assert list((tmp_path / "staging").rglob("photo.jpg"))[0].read_bytes() == b"original"
+    assert (
+        list((tmp_path / "staging").rglob("photo.jpg"))[0].read_bytes() == b"original"
+    )
     assert list_items(ledger)[0].status == "failed"
 
 
@@ -85,12 +87,18 @@ def test_changed_staged_file_is_not_published_or_cleaned(tmp_path: Path) -> None
 
     with pytest.raises(ValueError, match="changed"):
         run_once(
-            Source("Phone-1", inbox), media, tmp_path / "staging",
-            tmp_path / "ledger.sqlite", cloud,
+            Source("Phone-1", inbox),
+            media,
+            tmp_path / "staging",
+            tmp_path / "ledger.sqlite",
+            cloud,
         )
 
     assert cloud.archive == {}
-    assert list((tmp_path / "staging").rglob("photo.jpg"))[0].read_bytes() == b"new local content"
+    assert (
+        list((tmp_path / "staging").rglob("photo.jpg"))[0].read_bytes()
+        == b"new local content"
+    )
 
 
 def test_existing_archive_conflict_retains_both_copies(tmp_path: Path) -> None:
@@ -102,7 +110,9 @@ def test_existing_archive_conflict_retains_both_copies(tmp_path: Path) -> None:
     os.utime(media, (timestamp, timestamp))
     cloud = FakeCloud()
     ledger = tmp_path / "ledger.sqlite"
-    first = run_once(Source("Phone-1", inbox), media, tmp_path / "staging", ledger, cloud)
+    first = run_once(
+        Source("Phone-1", inbox), media, tmp_path / "staging", ledger, cloud
+    )
     media.write_bytes(b"second")
     os.utime(media, (timestamp, timestamp))
 
@@ -123,7 +133,11 @@ def test_source_id_stays_stable_when_inbox_moves(tmp_path: Path) -> None:
     os.utime(media, (timestamp, timestamp))
     cloud = FakeCloud()
     first = run_once(
-        Source("Phone-1", inbox), media, tmp_path / "staging", tmp_path / "ledger.sqlite", cloud
+        Source("Phone-1", inbox),
+        media,
+        tmp_path / "staging",
+        tmp_path / "ledger.sqlite",
+        cloud,
     )
     inbox.rename(tmp_path / "moved-inbox")
     moved = tmp_path / "moved-inbox" / "photo.jpg"
@@ -132,17 +146,23 @@ def test_source_id_stays_stable_when_inbox_moves(tmp_path: Path) -> None:
 
     with pytest.raises(FileExistsError):
         run_once(
-            Source("Phone-1", moved.parent), moved, tmp_path / "staging",
-            tmp_path / "ledger.sqlite", cloud,
+            Source("Phone-1", moved.parent),
+            moved,
+            tmp_path / "staging",
+            tmp_path / "ledger.sqlite",
+            cloud,
         )
     assert cloud.archive[first.destination] == b"first"
 
 
-@pytest.mark.parametrize("filename,source_id,outside", [
-    ("photo.jpg", "", False),
-    ("notes.txt", "Phone-1", False),
-    ("photo.jpg", "Phone-1", True),
-])
+@pytest.mark.parametrize(
+    "filename,source_id,outside",
+    [
+        ("photo.jpg", "", False),
+        ("notes.txt", "Phone-1", False),
+        ("photo.jpg", "Phone-1", True),
+    ],
+)
 def test_invalid_intake_remains_untouched(
     tmp_path: Path, filename: str, source_id: str, outside: bool
 ) -> None:
@@ -153,7 +173,13 @@ def test_invalid_intake_remains_untouched(
     cloud = FakeCloud()
 
     with pytest.raises(ValueError):
-        run_once(Source(source_id, inbox), media, tmp_path / "staging", tmp_path / "ledger.sqlite", cloud)
+        run_once(
+            Source(source_id, inbox),
+            media,
+            tmp_path / "staging",
+            tmp_path / "ledger.sqlite",
+            cloud,
+        )
 
     assert media.read_bytes() == b"untouched"
     assert not cloud.archive and not cloud.pending
@@ -186,12 +212,21 @@ def test_azure_adapter_publishes_verified_upload_without_replace(
     monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
     monkeypatch.setenv("FAKE_REMOTE", str(remote))
     credentials = tmp_path / "credentials.json"
-    credentials.write_text('{"tenant_id":"tenant","client_id":"client","client_secret":"secret"}')
+    credentials.write_text(
+        '{"tenant_id":"tenant","client_id":"client","client_secret":"secret"}'
+    )
     credentials.chmod(0o600)
 
     class FakeAzureFile:
-        def __init__(self, *, account_url: str, share_name: str, file_path: str,
-                     credential: object, token_intent: str) -> None:
+        def __init__(
+            self,
+            *,
+            account_url: str,
+            share_name: str,
+            file_path: str,
+            credential: object,
+            token_intent: str,
+        ) -> None:
             assert account_url == "https://myaccount.file.core.windows.net"
             assert share_name == "archive"
             assert token_intent == "backup"
@@ -220,7 +255,11 @@ def test_azure_adapter_publishes_verified_upload_without_replace(
     os.utime(item, (timestamp, timestamp))
 
     result = run_once(
-        Source("Phone-1", inbox), item, tmp_path / "staging", tmp_path / "ledger.sqlite", cloud
+        Source("Phone-1", inbox),
+        item,
+        tmp_path / "staging",
+        tmp_path / "ledger.sqlite",
+        cloud,
     )
 
     assert (remote / result.destination).read_bytes() == b"actual original"
@@ -229,8 +268,14 @@ def test_azure_adapter_publishes_verified_upload_without_replace(
     os.utime(item, (timestamp, timestamp))
     with pytest.raises(FileExistsError):
         run_once(
-            Source("Phone-1", inbox), item, tmp_path / "staging",
-            tmp_path / "ledger.sqlite", cloud,
+            Source("Phone-1", inbox),
+            item,
+            tmp_path / "staging",
+            tmp_path / "ledger.sqlite",
+            cloud,
         )
     assert (remote / result.destination).read_bytes() == b"actual original"
-    assert list((tmp_path / "staging").rglob("photo.jpg"))[0].read_bytes() == b"replacement"
+    assert (
+        list((tmp_path / "staging").rglob("photo.jpg"))[0].read_bytes()
+        == b"replacement"
+    )

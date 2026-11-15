@@ -14,7 +14,9 @@ from .pipeline import Source, list_items, run_once
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Publish one media item to the append-only archive")
+    parser = argparse.ArgumentParser(
+        description="Publish one media item to the append-only archive"
+    )
     parser.add_argument("--config", type=Path, required=True)
     commands = parser.add_subparsers(dest="command", required=True)
     ingest = commands.add_parser("run-once")
@@ -36,13 +38,26 @@ def main() -> int:
             if Path(args.item).is_absolute():
                 raise ValueError("Item path must be relative to the Source Inbox")
             azure = config["azure"]
-            cloud = AzureFiles(azure["account"], azure["share"], Path(azure["credentials"]))
+            cloud = AzureFiles(
+                azure["account"], azure["share"], Path(azure["credentials"])
+            )
             result = run_once(
-                Source(args.source, inbox), inbox / args.item, Path(config["staging"]), ledger, cloud
+                Source(args.source, inbox),
+                inbox / args.item,
+                Path(config["staging"]),
+                ledger,
+                cloud,
             )
             print(json.dumps(asdict(result)))
         return 0
-    except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError, AzureError) as exc:
+    except (
+        OSError,
+        ValueError,
+        KeyError,
+        RuntimeError,
+        subprocess.SubprocessError,
+        AzureError,
+    ) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

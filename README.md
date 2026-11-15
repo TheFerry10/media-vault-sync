@@ -8,7 +8,7 @@ files in Staging while the pipeline is running.
 
 ## Setup
 
-Install Python 3.11+, [uv](https://docs.astral.sh/uv/) and rclone 1.65 or newer
+Install Python 3.12+, [uv](https://docs.astral.sh/uv/) and rclone 1.65 or newer
 with the Azure Files backend. Run `uv sync --extra dev` in this directory.
 
 Create a service principal with Azure Files data permissions including backup
@@ -70,5 +70,7 @@ append-only guarantee. Backups and Azure cost validation are separate work.
 
 ```sh
 uv run --extra dev pytest
-uv run --extra dev mypy media_vault_sync tests
+uv run --extra dev ruff check .
+uv run --extra dev ruff format --check .
+uv run --extra dev mypy --strict src tests
 ```
