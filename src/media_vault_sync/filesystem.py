@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 import shutil
-from datetime import datetime
 from pathlib import Path
 
 from .domain import Source, sha256
 
 
-def capture_time(source: Source, item: Path) -> datetime:
+def modification_time(source: Source, item: Path) -> float:
     inbox = source.inbox.resolve(strict=True)
     if not inbox.is_dir() or not item.resolve(strict=True).is_relative_to(inbox):
         raise ValueError("Item must be inside the Source Inbox")
     if item.is_symlink() or not item.is_file():
         raise ValueError("Item must be a regular file, not a symlink")
-    return datetime.fromtimestamp(item.stat().st_mtime)
+    return item.stat().st_mtime
 
 
 def prepare_stage(staging: Path, run_id: str, filename: str) -> Path:
