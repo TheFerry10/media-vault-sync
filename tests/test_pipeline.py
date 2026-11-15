@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import time
 from collections.abc import Iterator
 from datetime import datetime
@@ -177,6 +178,33 @@ def test_capture_time_selection_is_recorded_at_pipeline_boundary(
     assert item.capture_time == expected_time.isoformat()
     assert item.capture_time_source == expected_source
     assert result.destination.startswith(f"{expected_time:%Y/%Y-%m}/")
+
+
+def test_legacy_ledger_remains_readable(tmp_path: Path) -> None:
+    ledger = tmp_path / "ledger.sqlite"
+    with sqlite3.connect(ledger) as db:
+        db.execute(
+            "CREATE TABLE items (id TEXT PRIMARY KEY, source_id TEXT, "
+            "destination TEXT, staged_path TEXT, pending_path TEXT, status TEXT, error TEXT)"
+        )
+        db.execute(
+            "INSERT INTO items VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "run",
+                "Phone-1",
+                "2024/2024-01/item.jpg",
+                "/staging/item.jpg",
+                "_pending/run/data",
+                "published",
+                None,
+            ),
+        )
+
+    item = list_items(ledger)[0]
+
+    assert item.status == "published"
+    assert item.capture_time is None
+    assert item.capture_time_source is None
 
 
 def test_corrupt_pending_upload_is_not_published_or_cleaned(tmp_path: Path) -> None:
