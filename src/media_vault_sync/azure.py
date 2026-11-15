@@ -10,8 +10,11 @@ import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
+from azure.core.exceptions import AzureError, ResourceExistsError
 from azure.identity import ClientSecretCredential
 from azure.storage.fileshare import ShareFileClient
+
+from .domain import TransientTransferError
 
 
 def load_credentials(path: Path) -> tuple[str, str, str]:
@@ -80,42 +83,45 @@ class AzureFiles:
     def _command(self, *args: str) -> list[str]:
         return ["rclone", "--config", "/dev/null", *args]
 
+    def _run_rclone(self, *args: str) -> None:
+        try:
+            subprocess.run(self._command(*args), env=self.env, check=True)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise TransientTransferError(f"rclone {args[0]} failed: {exc}") from exc
+
     def upload(self, path: Path, pending: str) -> None:
-        subprocess.run(
-            self._command("copyto", str(path), f":azurefiles:{pending}"),
-            env=self.env,
-            check=True,
-        )
+        self._run_rclone("copyto", str(path), f":azurefiles:{pending}")
 
     def read_pending(self, pending: str) -> Iterator[bytes]:
         with tempfile.TemporaryFile() as errors:
-            with subprocess.Popen(
-                self._command("cat", f":azurefiles:{pending}"),
-                env=self.env,
-                stdout=subprocess.PIPE,
-                stderr=errors,
-            ) as process:
-                output = process.stdout
-                assert output is not None
-                yield from iter(lambda: output.read(1024 * 1024), b"")
-                if process.wait():
-                    errors.seek(0)
-                    raise RuntimeError(
-                        f"rclone read-back failed: {errors.read().decode(errors='replace')}"
-                    )
+            try:
+                with subprocess.Popen(
+                    self._command("cat", f":azurefiles:{pending}"),
+                    env=self.env,
+                    stdout=subprocess.PIPE,
+                    stderr=errors,
+                ) as process:
+                    output = process.stdout
+                    assert output is not None
+                    yield from iter(lambda: output.read(1024 * 1024), b"")
+                    if process.wait():
+                        raise TransientTransferError("rclone read-back failed")
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise TransientTransferError(f"rclone read-back failed: {exc}") from exc
 
     def publish(self, pending: str, destination: str) -> None:
         directory = destination.rsplit("/", 1)[0]
-        subprocess.run(
-            self._command("mkdir", f":azurefiles:{directory}"),
-            env=self.env,
-            check=True,
-        )
-        with ShareFileClient(
-            account_url=f"https://{self.account}.file.core.windows.net",
-            share_name=self.share,
-            file_path=pending,
-            credential=self.credential,
-            token_intent="backup",
-        ) as client:
-            client.rename_file(destination, overwrite=False)
+        self._run_rclone("mkdir", f":azurefiles:{directory}")
+        try:
+            with ShareFileClient(
+                account_url=f"https://{self.account}.file.core.windows.net",
+                share_name=self.share,
+                file_path=pending,
+                credential=self.credential,
+                token_intent="backup",
+            ) as client:
+                client.rename_file(destination, overwrite=False)
+        except ResourceExistsError as exc:
+            raise FileExistsError(destination) from exc
+        except AzureError as exc:
+            raise TransientTransferError(f"Azure publication failed: {exc}") from exc

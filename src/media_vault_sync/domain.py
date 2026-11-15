@@ -44,6 +44,16 @@ class Status(StrEnum):
     PENDING = "pending"
     FAILED = "failed"
     PUBLISHED = "published"
+    SKIPPED = "skipped"
+
+
+class FailureKind(StrEnum):
+    PERMANENT = "permanent"
+    TRANSIENT = "transient"
+
+
+class TransientTransferError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,16 +66,21 @@ class Source:
 class Result:
     status: Status
     destination: str
+    error: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class LedgerItem:
     source_id: str
+    source_path: str
     destination: str
     staged_path: str
     pending_path: str
     status: Status
     error: str | None
+    failure_kind: FailureKind | None
+    attempt_count: int
+    next_retry_at: str | None
 
 
 def sha256(chunks: Iterable[bytes]) -> bytes:
