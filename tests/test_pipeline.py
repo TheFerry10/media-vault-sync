@@ -52,6 +52,118 @@ def test_archives_one_media_item_after_verification(tmp_path: Path) -> None:
     assert not list((tmp_path / "staging").rglob("photo.jpg"))
 
 
+def test_archives_supported_media_and_associated_sidecar_with_same_capture_time(
+    tmp_path: Path,
+) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    media = inbox / "photo.heic"
+    media.write_bytes(b"original media bytes")
+    sidecar = inbox / "photo.xmp"
+    sidecar.write_bytes(b"metadata bytes")
+    unknown = inbox / "photo.txt"
+    unknown.write_bytes(b"review me")
+    other_source = tmp_path / "other-source"
+    other_source.mkdir()
+    other_sidecar = other_source / "photo.xmp"
+    other_sidecar.write_bytes(b"other source metadata")
+    timestamp = datetime(2024, 1, 15, 12).timestamp()
+    os.utime(media, (timestamp, timestamp))
+    cloud = FakeCloud()
+
+    result = run_once(
+        Source("Phone-1", inbox),
+        media,
+        tmp_path / "staging",
+        tmp_path / "ledger.sqlite",
+        cloud,
+    )
+
+    sidecar_destination = next(
+        destination
+        for destination in cloud.archive
+        if destination.endswith("_photo.xmp")
+    )
+    assert result.destination.startswith(
+        "2024/2024-01/20240115_120000_07c3650bb7b5_photo.heic"
+    )
+    assert sidecar_destination.startswith(
+        "2024/2024-01/20240115_120000_07c3650bb7b5_photo.xmp"
+    )
+    assert cloud.archive[result.destination] == b"original media bytes"
+    assert cloud.archive[sidecar_destination] == b"metadata bytes"
+    assert not media.exists() and not sidecar.exists()
+    assert unknown.read_bytes() == b"review me"
+    assert other_sidecar.read_bytes() == b"other source metadata"
+
+
+def test_unknown_format_remains_in_inbox(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    unknown = inbox / "notes.txt"
+    unknown.write_bytes(b"review me")
+    cloud = FakeCloud()
+
+    with pytest.raises(ValueError, match="Unsupported"):
+        run_once(
+            Source("Phone-1", inbox),
+            unknown,
+            tmp_path / "staging",
+            tmp_path / "ledger.sqlite",
+            cloud,
+        )
+
+    assert unknown.read_bytes() == b"review me"
+    assert not cloud.archive and not cloud.pending
+
+
+@pytest.mark.parametrize(
+    "filename", ["photo.heif", "raw.cr3", "clip.mp4", "clip.m2ts"]
+)
+def test_common_photo_video_and_raw_formats_are_supported(
+    tmp_path: Path, filename: str
+) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    media = inbox / filename
+    media.write_bytes(b"supported media")
+
+    result = run_once(
+        Source("Phone-1", inbox),
+        media,
+        tmp_path / "staging",
+        tmp_path / "ledger.sqlite",
+        FakeCloud(),
+    )
+
+    assert result.status == "published"
+    assert result.destination.endswith(f"_{filename}")
+
+
+def test_ambiguous_sidecar_remains_in_inbox(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    media = inbox / "photo.jpg"
+    media.write_bytes(b"photo bytes")
+    other_media = inbox / "photo.heif"
+    other_media.write_bytes(b"other photo bytes")
+    sidecar = inbox / "photo.xmp"
+    sidecar.write_bytes(b"metadata bytes")
+    cloud = FakeCloud()
+
+    result = run_once(
+        Source("Phone-1", inbox),
+        media,
+        tmp_path / "staging",
+        tmp_path / "ledger.sqlite",
+        cloud,
+    )
+
+    assert list(cloud.archive) == [result.destination]
+    assert sidecar.read_bytes() == b"metadata bytes"
+    assert other_media.read_bytes() == b"other photo bytes"
+
+
 @pytest.mark.parametrize(
     ("timezone", "timestamp", "destination"),
     [

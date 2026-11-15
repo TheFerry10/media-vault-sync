@@ -47,10 +47,14 @@ uv run media-vault-sync --config /path/to/config.toml run-once Phone-1 photo.jpg
 uv run media-vault-sync --config /path/to/config.toml status
 ```
 
-The item path is relative to the selected Inbox. Supported photo/video
-extensions are listed in the pipeline; other files remain untouched. This
-slice uses the file's modification time in the host's local timezone and
-creates `YYYY/YYYY-MM/<timestamp>_<source-hash>_<original-name>`.
+The item path is relative to the selected Inbox. Supported photo, video, and
+camera RAW extensions are explicitly listed in the domain; other files remain
+untouched for review. A matching `.aae`, `.thm`, or `.xmp` sidecar is archived
+only when exactly one supported media file in the selected Source Inbox has the
+same filename stem. The sidecar inherits that media item's capture time;
+ambiguous sidecars remain in the Inbox. This slice uses the media file's
+modification time in the host's local timezone and creates
+`YYYY/YYYY-MM/<timestamp>_<source-hash>_<original-name>` for each published file.
 
 The item moves to a unique local Staging directory. rclone uploads it to a
 separate `_pending/` path, then reads it back for SHA-256 verification. Azure

@@ -8,6 +8,7 @@ from typing import Protocol
 
 from . import filesystem
 from .domain import (
+    MEDIA_EXTENSIONS,
     Result,
     Source,
     Status,
@@ -34,7 +35,30 @@ def run_once(
 ) -> Result:
     validate_source_id(source.id)
     timestamp = capture_time(filesystem.modification_time(source, item), localtime)
+    if item.suffix.lower() not in MEDIA_EXTENSIONS:
+        raise ValueError("Unsupported media extension")
+    sidecars = filesystem.associated_sidecars(source, item)
     destination = archive_destination(source.id, item.name, timestamp)
+    sidecar_destinations = [
+        (sidecar, archive_destination(source.id, sidecar.name, timestamp))
+        for sidecar in sidecars
+    ]
+
+    _publish_item(source, item, destination, staging, ledger, cloud)
+    for sidecar, sidecar_destination in sidecar_destinations:
+        filesystem.modification_time(source, sidecar)
+        _publish_item(source, sidecar, sidecar_destination, staging, ledger, cloud)
+    return Result(Status.PUBLISHED, destination)
+
+
+def _publish_item(
+    source: Source,
+    item: Path,
+    destination: str,
+    staging: Path,
+    ledger: Path,
+    cloud: Cloud,
+) -> None:
     run_id = uuid.uuid4().hex
     pending = f"_pending/{run_id}/data"
     staged = filesystem.prepare_stage(staging, run_id, item.name)
@@ -57,4 +81,3 @@ def run_once(
         if filesystem.file_hash(staged) != local_hash:
             raise ValueError("Staged file changed after publication; retained locally")
         filesystem.cleanup_stage(staged)
-    return Result(Status.PUBLISHED, destination)

@@ -17,9 +17,37 @@ MEDIA_EXTENSIONS = frozenset(
         ".webp",
         ".heic",
         ".heif",
+        ".avif",
+        ".bmp",
+        ".jxl",
         ".tif",
         ".tiff",
+        ".3fr",
+        ".ari",
+        ".bay",
+        ".cap",
+        ".dcs",
+        ".dcr",
+        ".drf",
         ".dng",
+        ".eip",
+        ".erf",
+        ".fff",
+        ".gpr",
+        ".iiq",
+        ".k25",
+        ".kdc",
+        ".mdc",
+        ".mef",
+        ".mos",
+        ".mrw",
+        ".nrw",
+        ".obm",
+        ".pef",
+        ".ptx",
+        ".pxn",
+        ".r3d",
+        ".raw",
         ".cr2",
         ".cr3",
         ".nef",
@@ -27,16 +55,36 @@ MEDIA_EXTENSIONS = frozenset(
         ".raf",
         ".orf",
         ".rw2",
+        ".rwz",
+        ".sr2",
+        ".srf",
+        ".srw",
+        ".sti",
+        ".x3f",
         ".mp4",
         ".mov",
         ".m4v",
         ".avi",
         ".mkv",
         ".3gp",
+        ".3g2",
+        ".flv",
+        ".m2v",
         ".mts",
         ".m2ts",
+        ".mpe",
+        ".mpeg",
+        ".mpg",
+        ".mpv",
+        ".mxf",
+        ".ogv",
+        ".ts",
+        ".vob",
+        ".webm",
+        ".wmv",
     }
 )
+SIDECAR_EXTENSIONS = frozenset({".aae", ".thm", ".xmp"})
 
 
 class Status(StrEnum):
@@ -95,7 +143,7 @@ def capture_time(
 
 
 def archive_destination(source_id: str, filename: str, capture_time: datetime) -> str:
-    if Path(filename).suffix.lower() not in MEDIA_EXTENSIONS:
+    if Path(filename).suffix.lower() not in MEDIA_EXTENSIONS | SIDECAR_EXTENSIONS:
         raise ValueError("Unsupported media extension")
     if any(ord(c) < 32 or c in '"*:<>?\\|' for c in filename):
         raise ValueError("Filename contains characters unsupported by Azure Files")
