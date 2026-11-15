@@ -8,8 +8,9 @@ files in Staging while the pipeline is running.
 
 ## Setup
 
-Install Python 3.12+, [uv](https://docs.astral.sh/uv/) and rclone 1.65 or newer
-with the Azure Files backend. Run `uv sync --extra dev` in this directory.
+Install Python 3.12+, [uv](https://docs.astral.sh/uv/), ExifTool, and rclone
+1.65 or newer with the Azure Files backend. Run `uv sync --extra dev` in this
+directory.
 
 Create a service principal with Azure Files data permissions including backup
 semantics (for example, Storage File Data Privileged Contributor) on the share.
@@ -52,6 +53,13 @@ extensions are listed in the pipeline; other files remain untouched. This
 slice uses the file's modification time in the host's local timezone and
 creates `YYYY/YYYY-MM/<timestamp>_<source-hash>_<original-name>`. A different
 item that collides with that name receives a deterministic content-hash suffix.
+Capture time prefers photo `DateTimeOriginal` / `CreateDate` tags and video
+`MediaCreateDate` / `CreateDate` tags. Invalid or missing metadata falls back to
+recognized WhatsApp filename dates and then the file's modification time in the
+host's local timezone. Source timestamps are used as recorded without timezone
+conversion; WhatsApp date-only filenames use `000000` for the unknown time. The
+selected timestamp and source are recorded in the ledger. The pipeline creates
+`YYYY/YYYY-MM/<timestamp>_<source-hash>_<original-name>`.
 
 The item moves to a unique local Staging directory. rclone uploads it to a
 separate `_pending/` path, then reads it back for SHA-256 verification. Azure
