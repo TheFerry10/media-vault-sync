@@ -18,8 +18,14 @@ class Ledger:
         try:
             self.db.execute(
                 "CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, source_id TEXT, "
-                "destination TEXT, staged_path TEXT, pending_path TEXT, status TEXT, error TEXT)"
+                "destination TEXT, staged_path TEXT, pending_path TEXT, status TEXT, error TEXT, "
+                "content_hash BLOB)"
             )
+            columns = {
+                row[1] for row in self.db.execute("PRAGMA table_info(items)").fetchall()
+            }
+            if "content_hash" not in columns:
+                self.db.execute("ALTER TABLE items ADD COLUMN content_hash BLOB")
         except sqlite3.Error:
             self.db.close()
             raise
@@ -40,7 +46,9 @@ class Ledger:
         self, run_id: str, source: Source, destination: str, staged: Path, pending: str
     ) -> None:
         self.db.execute(
-            "INSERT INTO items VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO items "
+            "(id, source_id, destination, staged_path, pending_path, status, error) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 run_id,
                 source.id,
@@ -59,6 +67,27 @@ class Ledger:
             (status, error, run_id),
         )
         self.db.commit()
+
+    def set_content_hash(self, run_id: str, content_hash: bytes) -> None:
+        self.db.execute(
+            "UPDATE items SET content_hash = ? WHERE id = ?", (content_hash, run_id)
+        )
+        self.db.commit()
+
+    def set_destination(self, run_id: str, destination: str) -> None:
+        self.db.execute(
+            "UPDATE items SET destination = ? WHERE id = ?", (destination, run_id)
+        )
+        self.db.commit()
+
+    def find_published(self, source_id: str, content_hash: bytes) -> str | None:
+        row = self.db.execute(
+            "SELECT destination FROM items "
+            "WHERE source_id = ? AND content_hash = ? AND status = ? "
+            "ORDER BY rowid LIMIT 1",
+            (source_id, content_hash, Status.PUBLISHED),
+        ).fetchone()
+        return None if row is None else str(row[0])
 
 
 def list_items(path: Path) -> list[LedgerItem]:

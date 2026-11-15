@@ -94,13 +94,33 @@ def capture_time(
     )
 
 
-def archive_destination(source_id: str, filename: str, capture_time: datetime) -> str:
+def archive_destination(
+    source_id: str,
+    filename: str,
+    capture_time: datetime,
+    content_hash: bytes | None = None,
+) -> str:
     if Path(filename).suffix.lower() not in MEDIA_EXTENSIONS:
         raise ValueError("Unsupported media extension")
     if any(ord(c) < 32 or c in '"*:<>?\\|' for c in filename):
         raise ValueError("Filename contains characters unsupported by Azure Files")
     source_hash = sha256([source_id.encode("utf-8")]).hex()[:12]
-    name = f"{capture_time:%Y%m%d_%H%M%S}_{source_hash}_{filename}"
+    prefix = f"{capture_time:%Y%m%d_%H%M%S}_{source_hash}_"
+    if content_hash is None:
+        name = f"{prefix}{filename}"
+    else:
+        if len(content_hash) != 32:
+            raise ValueError("Content hash must be a SHA-256 digest")
+        suffix = f"_{content_hash.hex()}{Path(filename).suffix}"
+        stem = Path(filename).stem
+        max_stem_length = (
+            255
+            - len(prefix.encode("utf-16-le")) // 2
+            - len(suffix.encode("utf-16-le")) // 2
+        )
+        while len(stem.encode("utf-16-le")) // 2 > max_stem_length:
+            stem = stem[:-1]
+        name = f"{prefix}{stem}{suffix}"
     if len(name.encode("utf-16-le")) // 2 > 255:
         raise ValueError("Archive filename exceeds Azure Files' 255-character limit")
     return f"{capture_time:%Y/%Y-%m}/{name}"

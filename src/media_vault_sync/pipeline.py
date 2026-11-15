@@ -44,12 +44,25 @@ def run_once(
             filesystem.stage_item(item, staged)
             db.update(run_id, Status.PENDING)
             local_hash = filesystem.file_hash(staged)
-            cloud.upload(staged, pending)
-            if sha256(cloud.read_pending(pending)) != local_hash:
-                raise ValueError("Pending upload verification failed")
-            if filesystem.file_hash(staged) != local_hash:
-                raise ValueError("Staged file changed during upload")
-            cloud.publish(pending, destination)
+            db.set_content_hash(run_id, local_hash)
+            duplicate_destination = db.find_published(source.id, local_hash)
+            if duplicate_destination is not None:
+                destination = duplicate_destination
+                db.set_destination(run_id, destination)
+            else:
+                cloud.upload(staged, pending)
+                if sha256(cloud.read_pending(pending)) != local_hash:
+                    raise ValueError("Pending upload verification failed")
+                if filesystem.file_hash(staged) != local_hash:
+                    raise ValueError("Staged file changed during upload")
+                try:
+                    cloud.publish(pending, destination)
+                except FileExistsError:
+                    destination = archive_destination(
+                        source.id, item.name, timestamp, local_hash
+                    )
+                    db.set_destination(run_id, destination)
+                    cloud.publish(pending, destination)
         except Exception as exc:
             db.update(run_id, Status.FAILED, str(exc))
             raise
