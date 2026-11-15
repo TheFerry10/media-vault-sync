@@ -1,0 +1,8 @@
+[Unit]
+Description=Poll media Inboxes and publish stable items
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/media-vault-sync --config %h/.config/media-vault-sync/config.toml poll
+StandardOutput=journal
+StandardError=journal

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import subprocess
 import sys
 import tomllib
@@ -10,7 +11,9 @@ from pathlib import Path
 
 from azure.core.exceptions import AzureError
 
+from .locking import exclusive_lock
 from .pipeline import Source, list_items, run_once
+from .poll import PollConfig, poll_once
 
 
 def main() -> int:
@@ -22,9 +25,11 @@ def main() -> int:
     ingest = commands.add_parser("run-once")
     ingest.add_argument("source")
     ingest.add_argument("item", help="Path relative to the Source Inbox")
+    commands.add_parser("poll")
     commands.add_parser("status")
     args = parser.parse_args()
 
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
         with args.config.open("rb") as stream:
             config = tomllib.load(stream)
@@ -34,21 +39,40 @@ def main() -> int:
         else:
             from .azure import AzureFiles
 
-            inbox = Path(config["sources"][args.source])
-            if Path(args.item).is_absolute():
-                raise ValueError("Item path must be relative to the Source Inbox")
             azure = config["azure"]
             cloud = AzureFiles(
                 azure["account"], azure["share"], Path(azure["credentials"])
             )
-            result = run_once(
-                Source(args.source, inbox),
-                inbox / args.item,
-                Path(config["staging"]),
-                ledger,
-                cloud,
-            )
-            print(json.dumps(asdict(result)))
+            if args.command == "poll":
+                backup = Path(config.get("ledger_backup", f"{ledger}.backup"))
+                max_age = float(config.get("ledger_backup_max_age_hours", 24)) * 3600
+                summary = poll_once(
+                    PollConfig(
+                        {name: Path(path) for name, path in config["sources"].items()},
+                        Path(config["staging"]),
+                        ledger,
+                        backup,
+                        max_age,
+                    ),
+                    cloud,
+                )
+                print(json.dumps(asdict(summary)))
+            else:
+                inbox = Path(config["sources"][args.source])
+                if Path(args.item).is_absolute():
+                    raise ValueError("Item path must be relative to the Source Inbox")
+                lock_path = ledger.with_suffix(ledger.suffix + ".lock")
+                with exclusive_lock(lock_path) as acquired:
+                    if not acquired:
+                        raise RuntimeError("Another pipeline run is already active")
+                    result = run_once(
+                        Source(args.source, inbox),
+                        inbox / args.item,
+                        Path(config["staging"]),
+                        ledger,
+                        cloud,
+                    )
+                print(json.dumps(asdict(result)))
         return 0
     except (
         OSError,

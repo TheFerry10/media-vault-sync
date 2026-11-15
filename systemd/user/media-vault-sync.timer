@@ -1,0 +1,10 @@
+[Unit]
+Description=Poll media Inboxes every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+Unit=media-vault-sync.service
+
+[Install]
+WantedBy=timers.target
