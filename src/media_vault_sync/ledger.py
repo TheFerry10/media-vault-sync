@@ -62,11 +62,14 @@ class Ledger:
 
 
 def list_items(path: Path) -> list[LedgerItem]:
-    with sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True) as db:
+    db = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+    try:
         rows = db.execute(
             "SELECT source_id, destination, staged_path, pending_path, status, error "
             "FROM items ORDER BY rowid"
         ).fetchall()
+    finally:
+        db.close()
     return [
         LedgerItem(source_id, destination, staged, pending, Status(status), error)
         for source_id, destination, staged, pending, status, error in rows
