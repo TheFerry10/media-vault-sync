@@ -68,6 +68,9 @@ append-only guarantee. Backups and Azure cost validation are separate work.
 
 ## Development
 
+CI runs the lint, formatting, type, and test checks on pull requests and
+pushes to `main`. Run the same checks locally:
+
 ```sh
 uv run --extra dev pytest
 uv run --extra dev ruff check .
