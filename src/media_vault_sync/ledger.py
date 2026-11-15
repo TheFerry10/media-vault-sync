@@ -18,8 +18,14 @@ class Ledger:
         try:
             self.db.execute(
                 "CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, source_id TEXT, "
-                "destination TEXT, staged_path TEXT, pending_path TEXT, status TEXT, error TEXT)"
+                "destination TEXT, staged_path TEXT, pending_path TEXT, status TEXT, error TEXT, "
+                "content_hash TEXT)"
             )
+            columns = {
+                row[1] for row in self.db.execute("PRAGMA table_info(items)").fetchall()
+            }
+            if "content_hash" not in columns:
+                self.db.execute("ALTER TABLE items ADD COLUMN content_hash TEXT")
         except sqlite3.Error:
             self.db.close()
             raise
@@ -40,7 +46,9 @@ class Ledger:
         self, run_id: str, source: Source, destination: str, staged: Path, pending: str
     ) -> None:
         self.db.execute(
-            "INSERT INTO items VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO items "
+            "(id, source_id, destination, staged_path, pending_path, status, error) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 run_id,
                 source.id,
@@ -53,6 +61,13 @@ class Ledger:
         )
         self.db.commit()
 
+    def record_hash(self, run_id: str, content_hash: str) -> None:
+        self.db.execute(
+            "UPDATE items SET content_hash = ? WHERE id = ?",
+            (content_hash, run_id),
+        )
+        self.db.commit()
+
     def update(self, run_id: str, status: Status, error: str | None = None) -> None:
         self.db.execute(
             "UPDATE items SET status = ?, error = ? WHERE id = ?",
@@ -60,17 +75,75 @@ class Ledger:
         )
         self.db.commit()
 
+    def recoverable_items(self) -> list[LedgerItem]:
+        rows = self.db.execute(
+            "SELECT id, source_id, destination, staged_path, pending_path, status, error, "
+            "content_hash FROM items ORDER BY rowid"
+        ).fetchall()
+        return [
+            LedgerItem(
+                run_id,
+                source_id,
+                destination,
+                staged,
+                pending,
+                Status(status),
+                error,
+                content_hash,
+            )
+            for (
+                run_id,
+                source_id,
+                destination,
+                staged,
+                pending,
+                status,
+                error,
+                content_hash,
+            ) in rows
+        ]
+
 
 def list_items(path: Path) -> list[LedgerItem]:
     db = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
     try:
+        columns = {row[1] for row in db.execute("PRAGMA table_info(items)").fetchall()}
+        content_hash = "content_hash" if "content_hash" in columns else "NULL"
         rows = db.execute(
-            "SELECT source_id, destination, staged_path, pending_path, status, error "
-            "FROM items ORDER BY rowid"
+            "SELECT id, source_id, destination, staged_path, pending_path, status, error, "
+            f"{content_hash} FROM items ORDER BY rowid"
         ).fetchall()
     finally:
         db.close()
     return [
-        LedgerItem(source_id, destination, staged, pending, Status(status), error)
-        for source_id, destination, staged, pending, status, error in rows
+        LedgerItem(
+            run_id,
+            source_id,
+            destination,
+            staged,
+            pending,
+            Status(status),
+            error,
+            content_hash,
+        )
+        for (
+            run_id,
+            source_id,
+            destination,
+            staged,
+            pending,
+            status,
+            error,
+            content_hash,
+        ) in rows
     ]
+
+
+def backup_ledger(source: Path, destination: Path) -> None:
+    source_db = sqlite3.connect(source)
+    destination_db = sqlite3.connect(destination)
+    try:
+        source_db.backup(destination_db)
+    finally:
+        destination_db.close()
+        source_db.close()

@@ -56,16 +56,19 @@ class Source:
 class Result:
     status: Status
     destination: str
+    backup_stale: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class LedgerItem:
+    id: str
     source_id: str
     destination: str
     staged_path: str
     pending_path: str
     status: Status
     error: str | None
+    content_hash: str | None
 
 
 def sha256(chunks: Iterable[bytes]) -> bytes:
