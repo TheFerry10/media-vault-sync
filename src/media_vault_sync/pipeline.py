@@ -3,6 +3,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from time import localtime
 from typing import Protocol
 
 from . import filesystem
@@ -11,6 +12,7 @@ from .domain import (
     Source,
     Status,
     archive_destination,
+    capture_time,
     sha256,
     validate_source_id,
 )
@@ -31,7 +33,7 @@ def run_once(
     source: Source, item: Path, staging: Path, ledger: Path, cloud: Cloud
 ) -> Result:
     validate_source_id(source.id)
-    timestamp = filesystem.capture_time(source, item)
+    timestamp = capture_time(filesystem.modification_time(source, item), localtime)
     destination = archive_destination(source.id, item.name, timestamp)
     run_id = uuid.uuid4().hex
     pending = f"_pending/{run_id}/data"

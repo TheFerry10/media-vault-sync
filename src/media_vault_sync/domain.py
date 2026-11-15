@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
+from time import struct_time
 
 MEDIA_EXTENSIONS = frozenset(
     {
@@ -77,6 +78,20 @@ def sha256(chunks: Iterable[bytes]) -> bytes:
 def validate_source_id(source_id: str) -> None:
     if not source_id.strip():
         raise ValueError("Source ID must not be empty")
+
+
+def capture_time(
+    timestamp: float, local_time: Callable[[float], struct_time]
+) -> datetime:
+    parts = local_time(timestamp)
+    return datetime(
+        parts.tm_year,
+        parts.tm_mon,
+        parts.tm_mday,
+        parts.tm_hour,
+        parts.tm_min,
+        parts.tm_sec,
+    )
 
 
 def archive_destination(source_id: str, filename: str, capture_time: datetime) -> str:

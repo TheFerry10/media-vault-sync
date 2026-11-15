@@ -1,4 +1,5 @@
 import os
+import time
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
@@ -49,6 +50,41 @@ def test_archives_one_media_item_after_verification(tmp_path: Path) -> None:
     assert cloud.archive[result.destination] == b"original media bytes"
     assert not media.exists()
     assert not list((tmp_path / "staging").rglob("photo.jpg"))
+
+
+@pytest.mark.parametrize(
+    ("timezone", "timestamp", "destination"),
+    [
+        ("UTC+02", 1704069000, "2023/2023-12/20231231_223000_"),
+        ("Europe/Berlin", 1721082600, "2024/2024-07/20240716_003000_"),
+    ],
+)
+def test_mtime_uses_local_timezone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    timezone: str,
+    timestamp: int,
+    destination: str,
+) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    media = inbox / "photo.jpg"
+    media.write_bytes(b"original")
+    os.utime(media, (timestamp, timestamp))
+    try:
+        with monkeypatch.context() as environment:
+            environment.setenv("TZ", timezone)
+            time.tzset()
+            result = run_once(
+                Source("Phone-1", inbox),
+                media,
+                tmp_path / "staging",
+                tmp_path / "ledger.sqlite",
+                FakeCloud(),
+            )
+    finally:
+        time.tzset()
+    assert result.destination.startswith(destination)
 
 
 def test_corrupt_pending_upload_is_not_published_or_cleaned(tmp_path: Path) -> None:
