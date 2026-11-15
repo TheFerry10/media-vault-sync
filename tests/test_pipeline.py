@@ -27,6 +27,14 @@ class FakeCloud:
         self.archive[destination] = self.pending.pop(pending)
 
 
+class FakeMetadata:
+    def __init__(self, tags: dict[str, str] | None = None) -> None:
+        self.tags = tags or {}
+
+    def extract(self, path: Path) -> dict[str, str]:
+        return self.tags
+
+
 def test_archives_one_media_item_after_verification(tmp_path: Path) -> None:
     inbox = tmp_path / "inbox"
     inbox.mkdir()
@@ -42,6 +50,7 @@ def test_archives_one_media_item_after_verification(tmp_path: Path) -> None:
         tmp_path / "staging",
         tmp_path / "ledger.sqlite",
         cloud,
+        FakeMetadata(),
     )
 
     assert result.status == "published"
@@ -82,10 +91,92 @@ def test_mtime_uses_local_timezone(
                 tmp_path / "staging",
                 tmp_path / "ledger.sqlite",
                 FakeCloud(),
+                FakeMetadata(),
             )
     finally:
         time.tzset()
     assert result.destination.startswith(destination)
+
+
+@pytest.mark.parametrize(
+    ("filename", "tags", "expected_time", "expected_source"),
+    [
+        (
+            "photo.jpg",
+            {
+                "DateTimeOriginal": "2022:03:04 05:06:07",
+                "CreateDate": "2023:04:05 06:07:08",
+            },
+            datetime(2022, 3, 4, 5, 6, 7),
+            "DateTimeOriginal",
+        ),
+        (
+            "video.mp4",
+            {
+                "MediaCreateDate": "2022:03:04 05:06:07+09:00",
+                "CreateDate": "2023:04:05 06:07:08",
+                "DateTimeOriginal": "2021:02:03 04:05:06",
+            },
+            datetime(2022, 3, 4, 5, 6, 7),
+            "MediaCreateDate",
+        ),
+        (
+            "photo.jpg",
+            {
+                "DateTimeOriginal": "not a date",
+                "CreateDate": "2023:04:05 06:07:08",
+            },
+            datetime(2023, 4, 5, 6, 7, 8),
+            "CreateDate",
+        ),
+        (
+            "WhatsApp Image 2024-03-04 at 05.06.07.jpeg",
+            {"DateTimeOriginal": "0000:00:00 00:00:00"},
+            datetime(2024, 3, 4, 5, 6, 7),
+            "WhatsApp filename",
+        ),
+        (
+            "IMG-20240304-WA0001.jpg",
+            {},
+            datetime(2024, 3, 4),
+            "WhatsApp filename",
+        ),
+        (
+            "Screenshot_20240304-050607.jpg",
+            {},
+            datetime.fromtimestamp(datetime(2024, 2, 1, 12).timestamp()),
+            "filesystem mtime",
+        ),
+    ],
+)
+def test_capture_time_selection_is_recorded_at_pipeline_boundary(
+    tmp_path: Path,
+    filename: str,
+    tags: dict[str, str],
+    expected_time: datetime,
+    expected_source: str,
+) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    media = inbox / filename
+    media.write_bytes(b"media")
+    modified_timestamp = datetime(2024, 2, 1, 12).timestamp()
+    os.utime(media, (modified_timestamp, modified_timestamp))
+    ledger = tmp_path / "ledger.sqlite"
+
+    result = run_once(
+        Source("Phone-1", inbox),
+        media,
+        tmp_path / "staging",
+        ledger,
+        FakeCloud(),
+        FakeMetadata(tags),
+    )
+
+    item = list_items(ledger)[0]
+    assert item.capture_time == expected_time.isoformat()
+    assert item.capture_time_source == expected_source
+    assert result.destination.startswith(f"{expected_time:%Y/%Y-%m}/")
 
 
 def test_corrupt_pending_upload_is_not_published_or_cleaned(tmp_path: Path) -> None:
@@ -101,7 +192,14 @@ def test_corrupt_pending_upload_is_not_published_or_cleaned(tmp_path: Path) -> N
     ledger = tmp_path / "ledger.sqlite"
 
     with pytest.raises(ValueError, match="verification"):
-        run_once(Source("Phone-1", inbox), media, tmp_path / "staging", ledger, cloud)
+        run_once(
+            Source("Phone-1", inbox),
+            media,
+            tmp_path / "staging",
+            ledger,
+            cloud,
+            FakeMetadata(),
+        )
 
     assert cloud.archive == {}
     assert (
@@ -129,6 +227,7 @@ def test_changed_staged_file_is_not_published_or_cleaned(tmp_path: Path) -> None
             tmp_path / "staging",
             tmp_path / "ledger.sqlite",
             cloud,
+            FakeMetadata(),
         )
 
     assert cloud.archive == {}
@@ -150,14 +249,25 @@ def test_different_content_collision_gets_deterministic_hash_suffix(
     cloud = FakeCloud()
     ledger = tmp_path / "ledger.sqlite"
     first = run_once(
-        Source("Phone-1", inbox), media, tmp_path / "staging", ledger, cloud
+        Source("Phone-1", inbox),
+        media,
+        tmp_path / "staging",
+        ledger,
+        cloud,
+        FakeMetadata(),
     )
     media.write_bytes(b"second")
     os.utime(media, (timestamp, timestamp))
 
-    second = run_once(
-        Source("Phone-1", inbox), media, tmp_path / "staging", ledger, cloud
-    )
+    with pytest.raises(FileExistsError):
+        run_once(
+            Source("Phone-1", inbox),
+            media,
+            tmp_path / "staging",
+            ledger,
+            cloud,
+            FakeMetadata(),
+        )
 
     assert cloud.archive[first.destination] == b"first"
     assert cloud.archive[second.destination] == b"second"
@@ -238,19 +348,22 @@ def test_source_id_stays_stable_when_inbox_moves(tmp_path: Path) -> None:
         tmp_path / "staging",
         tmp_path / "ledger.sqlite",
         cloud,
+        FakeMetadata(),
     )
     inbox.rename(tmp_path / "moved-inbox")
     moved = tmp_path / "moved-inbox" / "photo.jpg"
     moved.write_bytes(b"second")
     os.utime(moved, (timestamp, timestamp))
 
-    second = run_once(
-        Source("Phone-1", moved.parent),
-        moved,
-        tmp_path / "staging",
-        tmp_path / "ledger.sqlite",
-        cloud,
-    )
+    with pytest.raises(FileExistsError):
+        run_once(
+            Source("Phone-1", moved.parent),
+            moved,
+            tmp_path / "staging",
+            tmp_path / "ledger.sqlite",
+            cloud,
+            FakeMetadata(),
+        )
     assert cloud.archive[first.destination] == b"first"
     assert cloud.archive[second.destination] == b"second"
 
@@ -279,6 +392,7 @@ def test_invalid_intake_remains_untouched(
             tmp_path / "staging",
             tmp_path / "ledger.sqlite",
             cloud,
+            FakeMetadata(),
         )
 
     assert media.read_bytes() == b"untouched"
@@ -360,18 +474,26 @@ def test_azure_adapter_publishes_verified_upload_without_replace(
         tmp_path / "staging",
         tmp_path / "ledger.sqlite",
         cloud,
+        FakeMetadata(),
     )
 
     assert (remote / result.destination).read_bytes() == b"actual original"
     assert list_items(tmp_path / "ledger.sqlite")[0].status == "published"
     item.write_bytes(b"replacement")
     os.utime(item, (timestamp, timestamp))
-    replacement = run_once(
-        Source("Phone-1", inbox),
-        item,
-        tmp_path / "staging",
-        tmp_path / "ledger.sqlite",
-        cloud,
+    with pytest.raises(FileExistsError):
+        run_once(
+            Source("Phone-1", inbox),
+            item,
+            tmp_path / "staging",
+            tmp_path / "ledger.sqlite",
+            cloud,
+            FakeMetadata(),
+        )
+    assert (remote / result.destination).read_bytes() == b"actual original"
+    assert (
+        list((tmp_path / "staging").rglob("photo.jpg"))[0].read_bytes()
+        == b"replacement"
     )
     assert (remote / result.destination).read_bytes() == b"actual original"
     assert (remote / replacement.destination).read_bytes() == b"replacement"

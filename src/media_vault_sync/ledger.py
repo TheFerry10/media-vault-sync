@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Self
 
-from .domain import LedgerItem, Source, Status
+from .domain import CaptureTimeSource, LedgerItem, Source, Status
 
 
 class Ledger:
@@ -19,13 +20,13 @@ class Ledger:
             self.db.execute(
                 "CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, source_id TEXT, "
                 "destination TEXT, staged_path TEXT, pending_path TEXT, status TEXT, error TEXT, "
-                "content_hash BLOB)"
+                "capture_time TEXT, capture_time_source TEXT)"
             )
-            columns = {
-                row[1] for row in self.db.execute("PRAGMA table_info(items)").fetchall()
-            }
-            if "content_hash" not in columns:
-                self.db.execute("ALTER TABLE items ADD COLUMN content_hash BLOB")
+            columns = {row[1] for row in self.db.execute("PRAGMA table_info(items)")}
+            if "capture_time" not in columns:
+                self.db.execute("ALTER TABLE items ADD COLUMN capture_time TEXT")
+            if "capture_time_source" not in columns:
+                self.db.execute("ALTER TABLE items ADD COLUMN capture_time_source TEXT")
         except sqlite3.Error:
             self.db.close()
             raise
@@ -43,12 +44,19 @@ class Ledger:
             self.db.close()
 
     def start(
-        self, run_id: str, source: Source, destination: str, staged: Path, pending: str
+        self,
+        run_id: str,
+        source: Source,
+        destination: str,
+        staged: Path,
+        pending: str,
+        capture_time: datetime,
+        capture_time_source: CaptureTimeSource,
     ) -> None:
         self.db.execute(
             "INSERT INTO items "
-            "(id, source_id, destination, staged_path, pending_path, status, error) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(id, source_id, destination, staged_path, pending_path, status, error, "
+            "capture_time, capture_time_source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 run_id,
                 source.id,
@@ -57,6 +65,8 @@ class Ledger:
                 pending,
                 Status.STAGING,
                 None,
+                capture_time.isoformat(),
+                capture_time_source,
             ),
         )
         self.db.commit()
@@ -94,12 +104,33 @@ def list_items(path: Path) -> list[LedgerItem]:
     db = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
     try:
         rows = db.execute(
-            "SELECT source_id, destination, staged_path, pending_path, status, error "
+            "SELECT source_id, destination, staged_path, pending_path, status, error, "
+            "capture_time, capture_time_source "
             "FROM items ORDER BY rowid"
         ).fetchall()
     finally:
         db.close()
     return [
-        LedgerItem(source_id, destination, staged, pending, Status(status), error)
-        for source_id, destination, staged, pending, status, error in rows
+        LedgerItem(
+            source_id,
+            destination,
+            staged,
+            pending,
+            Status(status),
+            error,
+            capture_time,
+            CaptureTimeSource(capture_time_source)
+            if capture_time_source is not None
+            else None,
+        )
+        for (
+            source_id,
+            destination,
+            staged,
+            pending,
+            status,
+            error,
+            capture_time,
+            capture_time_source,
+        ) in rows
     ]

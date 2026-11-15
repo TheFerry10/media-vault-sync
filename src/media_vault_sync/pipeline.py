@@ -13,6 +13,7 @@ from .domain import (
     Status,
     archive_destination,
     capture_time,
+    select_capture_time,
     sha256,
     validate_source_id,
 )
@@ -29,17 +30,35 @@ class Cloud(Protocol):
     def publish(self, pending: str, destination: str) -> None: ...
 
 
+class Metadata(Protocol):
+    def extract(self, path: Path) -> dict[str, str]: ...
+
+
 def run_once(
-    source: Source, item: Path, staging: Path, ledger: Path, cloud: Cloud
+    source: Source,
+    item: Path,
+    staging: Path,
+    ledger: Path,
+    cloud: Cloud,
+    metadata: Metadata,
 ) -> Result:
     validate_source_id(source.id)
-    timestamp = capture_time(filesystem.modification_time(source, item), localtime)
-    destination = archive_destination(source.id, item.name, timestamp)
+    modified_at = capture_time(filesystem.modification_time(source, item), localtime)
+    selected_time = select_capture_time(item.name, metadata.extract(item), modified_at)
+    destination = archive_destination(source.id, item.name, selected_time.value)
     run_id = uuid.uuid4().hex
     pending = f"_pending/{run_id}/data"
     staged = filesystem.prepare_stage(staging, run_id, item.name)
     with Ledger(ledger) as db:
-        db.start(run_id, source, destination, staged, pending)
+        db.start(
+            run_id,
+            source,
+            destination,
+            staged,
+            pending,
+            selected_time.value,
+            selected_time.source,
+        )
         try:
             filesystem.stage_item(item, staged)
             db.update(run_id, Status.PENDING)
