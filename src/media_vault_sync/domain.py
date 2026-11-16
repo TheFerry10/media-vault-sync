@@ -95,10 +95,12 @@ class Result:
     status: Status
     destination: str
     error: str | None = None
+    backup_stale: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class LedgerItem:
+    id: str
     source_id: str
     source_path: str
     destination: str
@@ -109,6 +111,7 @@ class LedgerItem:
     failure_kind: FailureKind | None
     attempt_count: int
     next_retry_at: str | None
+    content_hash: str | bytes | None
     capture_time: str | None
     capture_time_source: CaptureTimeSource | None
 
@@ -224,9 +227,7 @@ def archive_destination(
         raise ValueError("Filename contains characters unsupported by Azure Files")
     source_hash = sha256([source_id.encode("utf-8")]).hex()[:12]
     prefix = f"{capture_time:%Y%m%d_%H%M%S}_{source_hash}_"
-    if content_hash is None:
-        name = f"{prefix}{filename}"
-    else:
+    if content_hash is not None:
         if len(content_hash) != 32:
             raise ValueError("Content hash must be a SHA-256 digest")
         suffix = f"_{content_hash.hex()}{Path(filename).suffix}"
@@ -243,6 +244,8 @@ def archive_destination(
         while len(stem.encode("utf-16-le")) // 2 > max_stem_length:
             stem = stem[:-1]
         name = f"{prefix}{stem}{suffix}"
+    else:
+        name = f"{prefix}{filename}"
     if len(name.encode("utf-16-le")) // 2 > 255:
         raise ValueError("Archive filename exceeds Azure Files' 255-character limit")
     return f"{capture_time:%Y/%Y-%m}/{name}"

@@ -93,10 +93,16 @@ class AzureFiles:
         self._run_rclone("copyto", str(path), f":azurefiles:{pending}")
 
     def read_pending(self, pending: str) -> Iterator[bytes]:
+        yield from self._read(pending)
+
+    def read_archive(self, destination: str) -> Iterator[bytes]:
+        yield from self._read(destination)
+
+    def _read(self, path: str) -> Iterator[bytes]:
         with tempfile.TemporaryFile() as errors:
             try:
                 with subprocess.Popen(
-                    self._command("cat", f":azurefiles:{pending}"),
+                    self._command("cat", f":azurefiles:{path}"),
                     env=self.env,
                     stdout=subprocess.PIPE,
                     stderr=errors,
@@ -105,11 +111,21 @@ class AzureFiles:
                     assert output is not None
                     yield from iter(lambda: output.read(1024 * 1024), b"")
                     if process.wait():
-                        raise TransientTransferError("rclone read-back failed")
+                        errors.seek(0)
+                        raise RuntimeError(
+                            "rclone read-back failed: "
+                            f"{errors.read().decode(errors='replace')}"
+                        )
             except (OSError, subprocess.SubprocessError) as exc:
                 raise TransientTransferError(f"rclone read-back failed: {exc}") from exc
 
     def publish(self, pending: str, destination: str) -> None:
+        self._rename(pending, destination, overwrite=False)
+
+    def publish_backup(self, pending: str, destination: str) -> None:
+        self._rename(pending, destination, overwrite=True)
+
+    def _rename(self, pending: str, destination: str, *, overwrite: bool) -> None:
         directory = destination.rsplit("/", 1)[0]
         self._run_rclone("mkdir", f":azurefiles:{directory}")
         try:
@@ -120,7 +136,7 @@ class AzureFiles:
                 credential=self.credential,
                 token_intent="backup",
             ) as client:
-                client.rename_file(destination, overwrite=False)
+                client.rename_file(destination, overwrite=overwrite)
         except ResourceExistsError as exc:
             raise FileExistsError(destination) from exc
         except AzureError as exc:

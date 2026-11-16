@@ -82,6 +82,18 @@ a published item with a non-published ledger status; review both paths before
 taking action. Manual SMB changes are outside the automated append-only
 guarantee. Backups and Azure cost validation are separate work.
 
+At the start of a run, the pipeline checks unresolved ledger entries against
+their final Cloud archive objects and marks a matching object published before
+cleaning up its verified Staging copy. If the final object cannot be verified,
+the local copy is retained.
+
+After each run, the SQLite ledger is copied to `_ledger/ledger.sqlite`, separate
+from media objects. Each refresh uploads and verifies a uniquely named candidate
+before replacing the prior backup. If refresh fails, the previous backup stays
+intact and the operation reports `backup_stale`; media processing is not halted.
+Manual SMB changes are outside the automated append-only guarantee. Validate
+actual Azure costs before provisioning recovery protection.
+
 ## Development
 
 CI runs the lint, formatting, type, and test checks on pull requests and
