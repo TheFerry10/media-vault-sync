@@ -6,7 +6,30 @@ from pathlib import Path
 from types import TracebackType
 from typing import Self
 
-from .domain import CaptureTimeSource, LedgerItem, Source, Status
+from .domain import (
+    CaptureTimeSource,
+    FailureKind,
+    LedgerItem,
+    Source,
+    Status,
+)
+
+_ITEM_COLUMNS = (
+    "id",
+    "source_id",
+    "source_path",
+    "destination",
+    "staged_path",
+    "pending_path",
+    "status",
+    "error",
+    "failure_kind",
+    "attempt_count",
+    "next_retry_at",
+    "content_hash",
+    "capture_time",
+    "capture_time_source",
+)
 
 
 class Ledger:
@@ -19,18 +42,27 @@ class Ledger:
         try:
             self.db.execute(
                 "CREATE TABLE IF NOT EXISTS items (id TEXT PRIMARY KEY, source_id TEXT, "
-                "destination TEXT, staged_path TEXT, pending_path TEXT, status TEXT, error TEXT, "
+                "source_path TEXT NOT NULL DEFAULT '', destination TEXT, staged_path TEXT, "
+                "pending_path TEXT, status TEXT, error TEXT, failure_kind TEXT, "
+                "attempt_count INTEGER NOT NULL DEFAULT 0, next_retry_at TEXT, "
                 "content_hash BLOB, capture_time TEXT, capture_time_source TEXT)"
             )
-            columns = {row[1] for row in self.db.execute("PRAGMA table_info(items)")}
-            for name, column_type in (
-                ("content_hash", "BLOB"),
-                ("capture_time", "TEXT"),
-                ("capture_time_source", "TEXT"),
-            ):
+            columns = {
+                row[1] for row in self.db.execute("PRAGMA table_info(items)").fetchall()
+            }
+            migrations = {
+                "source_path": "TEXT NOT NULL DEFAULT ''",
+                "failure_kind": "TEXT",
+                "attempt_count": "INTEGER NOT NULL DEFAULT 0",
+                "next_retry_at": "TEXT",
+                "content_hash": "BLOB",
+                "capture_time": "TEXT",
+                "capture_time_source": "TEXT",
+            }
+            for name, declaration in migrations.items():
                 if name not in columns:
                     self.db.execute(
-                        f"ALTER TABLE items ADD COLUMN {name} {column_type}"
+                        f"ALTER TABLE items ADD COLUMN {name} {declaration}"
                     )
         except sqlite3.Error:
             self.db.close()
@@ -52,24 +84,29 @@ class Ledger:
         self,
         run_id: str,
         source: Source,
+        source_path: str,
         destination: str,
         staged: Path,
         pending: str,
         capture_time: datetime,
         capture_time_source: CaptureTimeSource,
+        attempt_count: int,
     ) -> None:
         self.db.execute(
             "INSERT INTO items "
-            "(id, source_id, destination, staged_path, pending_path, status, error, "
-            "capture_time, capture_time_source) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(id, source_id, source_path, destination, staged_path, pending_path, "
+            "status, error, failure_kind, attempt_count, next_retry_at, content_hash, "
+            "capture_time, capture_time_source) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, NULL, ?, ?)",
             (
                 run_id,
                 source.id,
+                source_path,
                 destination,
                 str(staged),
                 pending,
                 Status.STAGING,
-                None,
+                attempt_count,
                 capture_time.isoformat(),
                 capture_time_source,
             ),
@@ -83,46 +120,27 @@ class Ledger:
         )
         self.db.commit()
 
-    def update(self, run_id: str, status: Status, error: str | None = None) -> None:
+    def update(
+        self,
+        run_id: str,
+        status: Status,
+        error: str | None = None,
+        failure_kind: FailureKind | None = None,
+        attempt_count: int = 0,
+        next_retry_at: str | None = None,
+    ) -> None:
         self.db.execute(
-            "UPDATE items SET status = ?, error = ? WHERE id = ?",
-            (status, error, run_id),
+            "UPDATE items SET status = ?, error = ?, failure_kind = ?, "
+            "attempt_count = ?, next_retry_at = ? WHERE id = ?",
+            (status, error, failure_kind, attempt_count, next_retry_at, run_id),
         )
         self.db.commit()
 
     def recoverable_items(self) -> list[LedgerItem]:
         rows = self.db.execute(
-            "SELECT id, source_id, destination, staged_path, pending_path, status, error, "
-            "content_hash, capture_time, capture_time_source FROM items ORDER BY rowid"
+            f"SELECT {', '.join(_ITEM_COLUMNS)} FROM items ORDER BY rowid"
         ).fetchall()
-        return [
-            LedgerItem(
-                run_id,
-                source_id,
-                destination,
-                staged,
-                pending,
-                Status(status),
-                error,
-                content_hash,
-                capture_time,
-                CaptureTimeSource(capture_time_source)
-                if capture_time_source is not None
-                else None,
-            )
-            for (
-                run_id,
-                source_id,
-                destination,
-                staged,
-                pending,
-                status,
-                error,
-                content_hash,
-                capture_time,
-                capture_time_source,
-            ) in rows
-        ]
+        return [_ledger_item(row) for row in rows]
 
     def set_destination(self, run_id: str, destination: str) -> None:
         self.db.execute(
@@ -139,53 +157,91 @@ class Ledger:
         ).fetchone()
         return None if row is None else str(row[0])
 
+    def latest(self, source_id: str, source_path: str) -> LedgerItem | None:
+        row = self.db.execute(
+            f"SELECT {', '.join(_ITEM_COLUMNS)} FROM items "
+            "WHERE source_id = ? AND source_path = ? ORDER BY rowid DESC LIMIT 1",
+            (source_id, source_path),
+        ).fetchone()
+        return _ledger_item(row) if row is not None else None
+
 
 def list_items(path: Path) -> list[LedgerItem]:
     db = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
     try:
         columns = {row[1] for row in db.execute("PRAGMA table_info(items)")}
-        item_id = "id" if "id" in columns else "''"
-        content_hash = "content_hash" if "content_hash" in columns else "NULL"
-        capture_time = "capture_time" if "capture_time" in columns else "NULL"
-        capture_time_source = (
-            "capture_time_source" if "capture_time_source" in columns else "NULL"
-        )
+
+        def expression(name: str) -> str:
+            if name in columns:
+                return name
+            return {
+                "id": "''",
+                "source_id": "''",
+                "source_path": "''",
+                "destination": "''",
+                "staged_path": "''",
+                "pending_path": "''",
+                "status": "'failed'",
+                "attempt_count": "0",
+                "content_hash": "NULL",
+            }.get(name, "NULL")
+
         rows = db.execute(
-            "SELECT "
-            f"{item_id}, source_id, destination, staged_path, pending_path, status, error, "
-            f"{content_hash}, {capture_time}, {capture_time_source} "
+            f"SELECT {', '.join(expression(name) for name in _ITEM_COLUMNS)} "
             "FROM items ORDER BY rowid"
         ).fetchall()
     finally:
         db.close()
-    return [
-        LedgerItem(
-            run_id,
-            source_id,
-            destination,
-            staged,
-            pending,
-            Status(status),
-            error,
-            content_hash,
-            capture_time,
-            CaptureTimeSource(capture_time_source)
-            if capture_time_source is not None
-            else None,
-        )
-        for (
-            run_id,
-            source_id,
-            destination,
-            staged,
-            pending,
-            status,
-            error,
-            content_hash,
-            capture_time,
-            capture_time_source,
-        ) in rows
-    ]
+    return [_ledger_item(row) for row in rows]
+
+
+def list_failed_items(path: Path) -> list[LedgerItem]:
+    latest: dict[tuple[str, str], LedgerItem] = {}
+    for item in list_items(path):
+        source_path = item.source_path or item.destination
+        latest[(item.source_id, source_path)] = item
+    return [item for item in latest.values() if item.status == Status.FAILED]
+
+
+def _ledger_item(row: tuple[object, ...]) -> LedgerItem:
+    (
+        item_id,
+        source_id,
+        source_path,
+        destination,
+        staged_path,
+        pending_path,
+        status,
+        error,
+        failure_kind,
+        attempt_count,
+        next_retry_at,
+        content_hash,
+        capture_time,
+        capture_time_source,
+    ) = row
+    return LedgerItem(
+        str(item_id),
+        str(source_id),
+        str(source_path),
+        str(destination),
+        str(staged_path),
+        str(pending_path),
+        Status(str(status)),
+        str(error) if error is not None else None,
+        FailureKind(str(failure_kind)) if failure_kind is not None else None,
+        int(str(attempt_count)),
+        str(next_retry_at) if next_retry_at is not None else None,
+        content_hash.hex()
+        if isinstance(content_hash, bytes)
+        else str(content_hash)
+        if isinstance(content_hash, str)
+        else None,
+        str(capture_time) if capture_time is not None else None,
+        CaptureTimeSource(str(capture_time_source))
+        if capture_time_source is not None
+        else None,
+    )
 
 
 def backup_ledger(source: Path, destination: Path) -> None:

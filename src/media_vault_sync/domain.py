@@ -64,6 +64,16 @@ class Status(StrEnum):
     PENDING = "pending"
     FAILED = "failed"
     PUBLISHED = "published"
+    SKIPPED = "skipped"
+
+
+class FailureKind(StrEnum):
+    PERMANENT = "permanent"
+    TRANSIENT = "transient"
+
+
+class TransientTransferError(RuntimeError):
+    pass
 
 
 class CaptureTimeSource(StrEnum):
@@ -84,6 +94,7 @@ class Source:
 class Result:
     status: Status
     destination: str
+    error: str | None = None
     backup_stale: bool = False
 
 
@@ -91,11 +102,15 @@ class Result:
 class LedgerItem:
     id: str
     source_id: str
+    source_path: str
     destination: str
     staged_path: str
     pending_path: str
     status: Status
     error: str | None
+    failure_kind: FailureKind | None
+    attempt_count: int
+    next_retry_at: str | None
     content_hash: str | bytes | None
     capture_time: str | None
     capture_time_source: CaptureTimeSource | None
@@ -222,6 +237,10 @@ def archive_destination(
             - len(prefix.encode("utf-16-le")) // 2
             - len(suffix.encode("utf-16-le")) // 2
         )
+        if max_stem_length < 0:
+            raise ValueError(
+                "Archive filename exceeds Azure Files' 255-character limit"
+            )
         while len(stem.encode("utf-16-le")) // 2 > max_stem_length:
             stem = stem[:-1]
         name = f"{prefix}{stem}{suffix}"
