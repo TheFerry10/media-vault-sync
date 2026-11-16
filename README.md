@@ -1,9 +1,10 @@
 # Media Vault Sync
 
-Media Vault Sync archives media to an SMB Azure Files share. It can publish
-individual files or monitor Inboxes for stable files.
-Only run it on a file whose transfer into the Inbox has finished. Do not edit
-files in Staging while the pipeline is running.
+Media Vault Sync archives completed media files from configured Inboxes to an
+SMB Azure Files share. It supports individual runs, batch processing, and
+scheduled polling of stable Inbox files. Only process files whose transfer into
+the Inbox has finished. Do not edit files in Staging while the pipeline is
+running.
 
 ## Setup
 
@@ -47,7 +48,10 @@ Azure's no-replace rename API is not available on NFS shares.
 ```sh
 uv run media-vault-sync --config /path/to/config.toml run-once Phone-1 photo.jpg
 uv run media-vault-sync --config /path/to/config.toml poll
+uv run media-vault-sync --config /path/to/config.toml process
 uv run media-vault-sync --config /path/to/config.toml status
+uv run media-vault-sync --config /path/to/config.toml review
+uv run media-vault-sync --config /path/to/config.toml retry Phone-1 photo.jpg
 ```
 
 The item path is relative to the selected Inbox. Supported photo/video
@@ -60,13 +64,15 @@ conversion; WhatsApp date-only filenames use `000000` for the unknown time. The
 selected timestamp and source are recorded in the ledger. The pipeline creates
 `YYYY/YYYY-MM/<timestamp>_<source-hash>_<original-name>`.
 
-The item moves to a unique local Staging directory. rclone uploads it to a
-separate `_pending/` path, then reads it back for SHA-256 verification. Azure
-Files performs publication using an atomic server-side rename with replacement
-disabled. Re-imports are deduplicated only within the same Source after the
-ledger confirms the earlier item was published. A destination conflict is
-resolved with a content-hash suffix rather than overwriting. The ledger records
-publication before Staging is cleaned.
+The item is copied to a unique local Staging directory, leaving the Inbox copy
+in place until publication is verified and recorded. rclone uploads the staged
+copy to a separate `_pending/` path, then reads it back for SHA-256 verification.
+Azure Files performs publication using an atomic server-side rename with
+replacement disabled. Re-imports are deduplicated only within the same Source
+after the ledger confirms the earlier item was published. A destination
+collision is resolved with a content-hash suffix rather than overwriting. After
+successful publication, the ledger records it before the Inbox and Staging
+copies are cleaned.
 
 ## Automatic polling on Ubuntu
 
@@ -95,15 +101,21 @@ failures trigger one after 24 hours. Notifications never include filenames,
 media contents, or metadata. Desktop notifications require an active local
 graphical session and `notify-send`.
 
-On failure, inspect `status`: it includes the staged and pending paths and an
-error. Staged data and pending uploads are intentionally retained. Do not
-manually delete the only remaining copy; automated orphan cleanup is not yet
-implemented. A crash or uncertain rename response may leave a published item
-with a non-published ledger status. At the start of the next run, the pipeline
-checks unresolved ledger entries against their final Cloud archive objects and
-marks a matching object published before cleaning up its verified Staging copy.
-If the final object cannot be verified, the local copy is retained. Manual SMB
-changes are outside the automated append-only guarantee.
+`process` attempts every eligible media file in all configured Inboxes; a
+failure on one file does not stop the rest. Transient transfer failures retry
+when `process` is run again after an increasing delay (15 minutes initially,
+capped at 6 hours). Permanent failures remain in the Inbox and are suppressed
+until explicitly retried with `retry`. Use `review` to see the latest failed
+items and their reasons; `status` shows the full ledger journal. Staged data and
+pending uploads are intentionally retained after failure. Do not manually
+delete the only remaining copy. A crash or uncertain rename response may leave
+a published item with a non-published ledger status.
+
+At the start of a run, the pipeline checks unresolved ledger entries against
+their final Cloud archive objects and marks a matching object published before
+cleaning up its verified Staging copy. If the final object cannot be verified,
+the local copy is retained. Manual SMB changes are outside the automated
+append-only guarantee.
 
 After each run, the SQLite ledger is copied to `_ledger/ledger.sqlite`, separate
 from media objects. Each refresh uploads and verifies a uniquely named candidate

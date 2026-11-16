@@ -1,16 +1,27 @@
 import os
 import sqlite3
 import subprocess
+import sys
 import time
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256 as hashlib_sha256
 from pathlib import Path
 
 import pytest
 
+from media_vault_sync.cli import main
 from media_vault_sync.exiftool import ExifTool
-from media_vault_sync.pipeline import Source, list_items, run_once
+from media_vault_sync.pipeline import (
+    FailureKind,
+    Source,
+    Status,
+    TransientTransferError,
+    list_failed_items,
+    list_items,
+    run_inbox,
+    run_once,
+)
 
 
 class FakeCloud:
@@ -351,15 +362,8 @@ def test_corrupt_pending_upload_is_not_published_or_cleaned(tmp_path: Path) -> N
     cloud = CorruptCloud()
     ledger = tmp_path / "ledger.sqlite"
 
-    with pytest.raises(ValueError, match="verification"):
-        run_once(
-            Source("Phone-1", inbox),
-            media,
-            tmp_path / "staging",
-            ledger,
-            cloud,
-            FakeMetadata(),
-        )
+    with pytest.raises(TransientTransferError, match="verification"):
+        run_once(Source("Phone-1", inbox), media, tmp_path / "staging", ledger, cloud)
 
     assert cloud.archive == {}
     assert (
@@ -755,3 +759,205 @@ def test_azure_adapter_publishes_verified_upload_without_replace(
     candidate.write_bytes(b"new verified backup")
     cloud.publish_backup("_ledger/pending/candidate.sqlite", "_ledger/ledger.sqlite")
     assert existing_backup.read_bytes() == b"new verified backup"
+
+
+def test_transient_failure_retries_after_backoff_and_keeps_inbox_copy(
+    tmp_path: Path,
+) -> None:
+    class FlakyCloud(FakeCloud):
+        failures = 1
+
+        def upload(self, path: Path, pending: str) -> None:
+            if self.failures:
+                self.failures -= 1
+                raise ConnectionError("network unavailable")
+            super().upload(path, pending)
+
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    media = inbox / "photo.jpg"
+    media.write_bytes(b"original")
+    ledger = tmp_path / "ledger.sqlite"
+    cloud = FlakyCloud()
+    now = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+    with pytest.raises(TransientTransferError, match="network unavailable"):
+        run_once(
+            Source("Phone-1", inbox),
+            media,
+            tmp_path / "staging",
+            ledger,
+            cloud,
+            now=now,
+        )
+
+    failed = list_items(ledger)[0]
+    assert media.read_bytes() == b"original"
+    assert failed.failure_kind == FailureKind.TRANSIENT
+    assert failed.attempt_count == 1
+    assert failed.next_retry_at == (now + timedelta(minutes=15)).isoformat()
+    assert (
+        run_once(
+            Source("Phone-1", inbox),
+            media,
+            tmp_path / "staging",
+            ledger,
+            cloud,
+            now=now + timedelta(minutes=14),
+        ).status
+        == Status.SKIPPED
+    )
+    assert len(list_items(ledger)) == 1
+    assert (
+        run_once(
+            Source("Phone-1", inbox),
+            media,
+            tmp_path / "staging",
+            ledger,
+            cloud,
+            now=now + timedelta(minutes=15),
+        ).status
+        == Status.PUBLISHED
+    )
+    assert not media.exists()
+
+
+def test_transient_backoff_grows_exponentially(tmp_path: Path) -> None:
+    class OfflineCloud(FakeCloud):
+        def upload(self, path: Path, pending: str) -> None:
+            raise ConnectionError("network unavailable")
+
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    media = inbox / "photo.jpg"
+    media.write_bytes(b"original")
+    ledger = tmp_path / "ledger.sqlite"
+    cloud = OfflineCloud()
+    now = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+    elapsed_minutes = (0, 15, 45, 105, 225, 465)
+    for attempt, elapsed in enumerate(elapsed_minutes, start=1):
+        with pytest.raises(TransientTransferError, match="network unavailable"):
+            run_once(
+                Source("Phone-1", inbox),
+                media,
+                tmp_path / "staging",
+                ledger,
+                cloud,
+                now=now + timedelta(minutes=elapsed),
+            )
+        failure = list_items(ledger)[-1]
+        assert failure.attempt_count == attempt
+        delay = min(15 * 2 ** (attempt - 1), 360)
+        assert (
+            failure.next_retry_at
+            == (now + timedelta(minutes=elapsed + delay)).isoformat()
+        )
+
+
+def test_permanent_failure_requires_explicit_retry_and_review_shows_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class InvalidMediaOnceCloud(FakeCloud):
+        failures = 1
+
+        def upload(self, path: Path, pending: str) -> None:
+            if self.failures:
+                self.failures -= 1
+                raise ValueError("Invalid media encoding")
+            super().upload(path, pending)
+
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    media = inbox / "photo.jpg"
+    media.write_bytes(b"original")
+    ledger = tmp_path / "ledger.sqlite"
+    cloud = InvalidMediaOnceCloud()
+    source = Source("Phone-1", inbox)
+
+    with pytest.raises(ValueError, match="Invalid media encoding"):
+        run_once(source, media, tmp_path / "staging", ledger, cloud)
+
+    failed = list_failed_items(ledger)
+    assert len(failed) == 1
+    assert failed[0].source_path == "photo.jpg"
+    assert failed[0].failure_kind == FailureKind.PERMANENT
+    assert failed[0].error == "Invalid media encoding"
+    assert media.read_bytes() == b"original"
+    config = tmp_path / "config.toml"
+    staging = tmp_path / "staging"
+    config.write_text(
+        f'ledger = "{ledger}"\n'
+        f'staging = "{staging}"\n'
+        "[sources]\n"
+        f'Phone-1 = "{inbox}"\n'
+        "[azure]\n"
+        'account = "myaccount"\n'
+        'share = "archive"\n'
+        f'credentials = "{tmp_path / "credentials.json"}"\n'
+    )
+    for command in ("status", "review"):
+        monkeypatch.setattr(
+            sys, "argv", ["media-vault-sync", "--config", str(config), command]
+        )
+        assert main() == 0
+        output = capsys.readouterr().out
+        assert "photo.jpg" in output
+        assert "Invalid media encoding" in output
+    assert run_once(source, media, tmp_path / "staging", ledger, cloud).status == (
+        Status.SKIPPED
+    )
+    assert len(list_items(ledger)) == 1
+    from media_vault_sync import azure, cli
+
+    def fake_azure(account: str, share: str, credentials: Path) -> FakeCloud:
+        return cloud
+
+    monkeypatch.setattr(azure, "AzureFiles", fake_azure)
+    monkeypatch.setattr(cli, "ExifTool", FakeMetadata)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "media-vault-sync",
+            "--config",
+            str(config),
+            "retry",
+            "Phone-1",
+            "photo.jpg",
+        ],
+    )
+    assert main() == 0
+    assert "published" in capsys.readouterr().out
+    assert not media.exists()
+    assert list_failed_items(ledger) == []
+
+
+def test_batch_failure_does_not_stop_unrelated_items(tmp_path: Path) -> None:
+    class OneItemFailsCloud(FakeCloud):
+        def upload(self, path: Path, pending: str) -> None:
+            if path.name == "bad.jpg":
+                raise ValueError("invalid media")
+            super().upload(path, pending)
+
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    bad = inbox / "bad.jpg"
+    good = inbox / "good.jpg"
+    bad.write_bytes(b"bad")
+    good.write_bytes(b"good")
+
+    results = run_inbox(
+        Source("Phone-1", inbox),
+        tmp_path / "staging",
+        tmp_path / "ledger.sqlite",
+        OneItemFailsCloud(),
+        now=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+
+    assert [result.status for result in results] == [Status.FAILED, Status.PUBLISHED]
+    assert bad.read_bytes() == b"bad"
+    assert not good.exists()
+    failures = list_failed_items(tmp_path / "ledger.sqlite")
+    assert len(failures) == 1
+    assert failures[0].error == "invalid media"

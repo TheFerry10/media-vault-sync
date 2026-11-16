@@ -22,7 +22,7 @@ def prepare_stage(staging: Path, run_id: str, filename: str) -> Path:
 
 
 def stage_item(item: Path, staged: Path) -> None:
-    shutil.move(str(item), str(staged))
+    shutil.copy2(item, staged)
 
 
 def file_hash(path: Path) -> bytes:
