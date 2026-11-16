@@ -1,0 +1,11 @@
+staging = "/home/you/media-staging"
+ledger = "/home/you/media-state/ledger.sqlite"
+
+[sources]
+Phone-1 = "/home/you/media-inbox/phone-1"
+Phone-2 = "/home/you/media-inbox/phone-2"
+
+[azure]
+account = "yourstorageaccount"
+share = "yourfileshare"
+credentials = "/home/you/.config/media-vault-sync/credentials.json"
