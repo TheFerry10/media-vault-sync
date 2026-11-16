@@ -17,6 +17,8 @@ class FakeCloud:
     def __init__(self) -> None:
         self.pending: dict[str, bytes] = {}
         self.archive: dict[str, bytes] = {}
+        self.backup: bytes | None = None
+        self.backup_destination: str | None = None
 
     def upload(self, path: Path, pending: str) -> None:
         self.pending[pending] = path.read_bytes()
@@ -24,10 +26,17 @@ class FakeCloud:
     def read_pending(self, pending: str) -> Iterator[bytes]:
         yield self.pending[pending]
 
+    def read_archive(self, destination: str) -> Iterator[bytes]:
+        yield self.archive[destination]
+
     def publish(self, pending: str, destination: str) -> None:
         if destination in self.archive:
             raise FileExistsError(destination)
         self.archive[destination] = self.pending.pop(pending)
+
+    def publish_backup(self, pending: str, destination: str) -> None:
+        self.backup = self.pending.pop(pending)
+        self.backup_destination = destination
 
 
 class FakeMetadata:
@@ -410,15 +419,14 @@ def test_different_content_collision_gets_deterministic_hash_suffix(
     media.write_bytes(b"second")
     os.utime(media, (timestamp, timestamp))
 
-    with pytest.raises(FileExistsError):
-        run_once(
-            Source("Phone-1", inbox),
-            media,
-            tmp_path / "staging",
-            ledger,
-            cloud,
-            FakeMetadata(),
-        )
+    second = run_once(
+        Source("Phone-1", inbox),
+        media,
+        tmp_path / "staging",
+        ledger,
+        cloud,
+        FakeMetadata(),
+    )
 
     assert cloud.archive[first.destination] == b"first"
     assert cloud.archive[second.destination] == b"second"
@@ -485,6 +493,101 @@ def test_identical_content_from_different_sources_keeps_provenance(
     assert [item.status for item in list_items(ledger)] == ["published", "published"]
 
 
+def test_reconciles_publish_completed_before_ledger_update(tmp_path: Path) -> None:
+    class PublishThenCrashCloud(FakeCloud):
+        crashed = False
+
+        def publish(self, pending: str, destination: str) -> None:
+            super().publish(pending, destination)
+            if not self.crashed:
+                self.crashed = True
+                raise SystemExit("simulated process interruption")
+
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    first = inbox / "photo.jpg"
+    first.write_bytes(b"first media")
+    cloud = PublishThenCrashCloud()
+    ledger = tmp_path / "ledger.sqlite"
+    staging = tmp_path / "staging"
+
+    with pytest.raises(SystemExit, match="interruption"):
+        run_once(Source("Phone-1", inbox), first, staging, ledger, cloud)
+
+    interrupted = list_items(ledger)[0]
+    assert interrupted.status == "pending"
+    assert Path(interrupted.staged_path).exists()
+    assert cloud.archive[interrupted.destination] == b"first media"
+
+    second = inbox / "video.mp4"
+    second.write_bytes(b"second media")
+    result = run_once(Source("Phone-1", inbox), second, staging, ledger, cloud)
+
+    items = list_items(ledger)
+    assert [entry.status for entry in items] == ["published", "published"]
+    assert not Path(interrupted.staged_path).exists()
+    assert cloud.archive[result.destination] == b"second media"
+
+
+def test_verified_ledger_backup_is_published_separately(tmp_path: Path) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    media = inbox / "photo.jpg"
+    media.write_bytes(b"original")
+    cloud = FakeCloud()
+
+    result = run_once(
+        Source("Phone-1", inbox),
+        media,
+        tmp_path / "staging",
+        tmp_path / "ledger.sqlite",
+        cloud,
+    )
+
+    assert not result.backup_stale
+    assert cloud.backup is not None
+    assert cloud.backup.startswith(b"SQLite format 3")
+    assert cloud.backup_destination == "_ledger/ledger.sqlite"
+    assert cloud.archive[result.destination] == b"original"
+    backup_path = tmp_path / "verified-backup.sqlite"
+    backup_path.write_bytes(cloud.backup)
+    with sqlite3.connect(backup_path) as backup:
+        assert backup.execute("SELECT status FROM items").fetchone() == ("published",)
+
+
+def test_failed_backup_keeps_previous_copy_and_does_not_stop_media(
+    tmp_path: Path,
+) -> None:
+    class CorruptBackupCloud(FakeCloud):
+        def read_pending(self, pending: str) -> Iterator[bytes]:
+            if pending.startswith("_ledger/"):
+                yield b"corrupted backup"
+            else:
+                yield from super().read_pending(pending)
+
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    media = inbox / "photo.jpg"
+    media.write_bytes(b"original")
+    cloud = CorruptBackupCloud()
+    cloud.backup = b"previous verified backup"
+
+    with pytest.warns(RuntimeWarning, match="Ledger backup is stale"):
+        result = run_once(
+            Source("Phone-1", inbox),
+            media,
+            tmp_path / "staging",
+            tmp_path / "ledger.sqlite",
+            cloud,
+        )
+
+    assert result.backup_stale
+    assert cloud.backup == b"previous verified backup"
+    assert cloud.backup_destination is None
+    assert len(cloud.archive) == 1
+    assert not media.exists()
+
+
 def test_source_id_stays_stable_when_inbox_moves(tmp_path: Path) -> None:
     inbox = tmp_path / "inbox"
     inbox.mkdir()
@@ -506,17 +609,17 @@ def test_source_id_stays_stable_when_inbox_moves(tmp_path: Path) -> None:
     moved.write_bytes(b"second")
     os.utime(moved, (timestamp, timestamp))
 
-    with pytest.raises(FileExistsError):
-        run_once(
-            Source("Phone-1", moved.parent),
-            moved,
-            tmp_path / "staging",
-            tmp_path / "ledger.sqlite",
-            cloud,
-            FakeMetadata(),
-        )
+    second = run_once(
+        Source("Phone-1", moved.parent),
+        moved,
+        tmp_path / "staging",
+        tmp_path / "ledger.sqlite",
+        cloud,
+        FakeMetadata(),
+    )
     assert cloud.archive[first.destination] == b"first"
     assert cloud.archive[second.destination] == b"second"
+    assert second.destination != first.destination
 
 
 @pytest.mark.parametrize(
@@ -604,9 +707,9 @@ def test_azure_adapter_publishes_verified_upload_without_replace(
             pass
 
         def rename_file(self, destination: str, *, overwrite: bool) -> None:
-            assert overwrite is False
+            assert isinstance(overwrite, bool)
             target = remote / destination
-            if target.exists():
+            if target.exists() and not overwrite:
                 raise FileExistsError(destination)
             self.path.rename(target)
 
@@ -632,21 +735,23 @@ def test_azure_adapter_publishes_verified_upload_without_replace(
     assert list_items(tmp_path / "ledger.sqlite")[0].status == "published"
     item.write_bytes(b"replacement")
     os.utime(item, (timestamp, timestamp))
-    with pytest.raises(FileExistsError):
-        run_once(
-            Source("Phone-1", inbox),
-            item,
-            tmp_path / "staging",
-            tmp_path / "ledger.sqlite",
-            cloud,
-            FakeMetadata(),
-        )
-    assert (remote / result.destination).read_bytes() == b"actual original"
-    assert (
-        list((tmp_path / "staging").rglob("photo.jpg"))[0].read_bytes()
-        == b"replacement"
+    replacement = run_once(
+        Source("Phone-1", inbox),
+        item,
+        tmp_path / "staging",
+        tmp_path / "ledger.sqlite",
+        cloud,
+        FakeMetadata(),
     )
     assert (remote / result.destination).read_bytes() == b"actual original"
     assert (remote / replacement.destination).read_bytes() == b"replacement"
     assert replacement.destination != result.destination
     assert not list((tmp_path / "staging").rglob("photo.jpg"))
+    existing_backup = remote / "_ledger" / "ledger.sqlite"
+    existing_backup.parent.mkdir(parents=True, exist_ok=True)
+    existing_backup.write_bytes(b"old verified backup")
+    candidate = remote / "_ledger" / "pending" / "candidate.sqlite"
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_bytes(b"new verified backup")
+    cloud.publish_backup("_ledger/pending/candidate.sqlite", "_ledger/ledger.sqlite")
+    assert existing_backup.read_bytes() == b"new verified backup"

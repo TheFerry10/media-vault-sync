@@ -84,16 +84,19 @@ class Source:
 class Result:
     status: Status
     destination: str
+    backup_stale: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class LedgerItem:
+    id: str
     source_id: str
     destination: str
     staged_path: str
     pending_path: str
     status: Status
     error: str | None
+    content_hash: str | bytes | None
     capture_time: str | None
     capture_time_source: CaptureTimeSource | None
 
@@ -197,16 +200,19 @@ def select_capture_time(
     return CaptureTime(modified_at, CaptureTimeSource.FILESYSTEM_MTIME)
 
 
-def archive_destination(source_id: str, filename: str, capture_time: datetime) -> str:
+def archive_destination(
+    source_id: str,
+    filename: str,
+    capture_time: datetime,
+    content_hash: bytes | None = None,
+) -> str:
     if Path(filename).suffix.lower() not in MEDIA_EXTENSIONS:
         raise ValueError("Unsupported media extension")
     if any(ord(c) < 32 or c in '"*:<>?\\|' for c in filename):
         raise ValueError("Filename contains characters unsupported by Azure Files")
     source_hash = sha256([source_id.encode("utf-8")]).hex()[:12]
     prefix = f"{capture_time:%Y%m%d_%H%M%S}_{source_hash}_"
-    if content_hash is None:
-        name = f"{prefix}{filename}"
-    else:
+    if content_hash is not None:
         if len(content_hash) != 32:
             raise ValueError("Content hash must be a SHA-256 digest")
         suffix = f"_{content_hash.hex()}{Path(filename).suffix}"
@@ -219,6 +225,8 @@ def archive_destination(source_id: str, filename: str, capture_time: datetime) -
         while len(stem.encode("utf-16-le")) // 2 > max_stem_length:
             stem = stem[:-1]
         name = f"{prefix}{stem}{suffix}"
+    else:
+        name = f"{prefix}{filename}"
     if len(name.encode("utf-16-le")) // 2 > 255:
         raise ValueError("Archive filename exceeds Azure Files' 255-character limit")
     return f"{capture_time:%Y/%Y-%m}/{name}"

@@ -1,8 +1,7 @@
 # Media Vault Sync
 
 This initial slice manually archives one completed media file at a time to an
-SMB Azure Files share. It does not yet monitor Inboxes, detect stable files,
-retry failures, resolve metadata dates, or recover after crashes.
+SMB Azure Files share. It does not yet monitor Inboxes or detect stable files.
 Only run it on a file whose transfer into the Inbox has finished. Do not edit
 files in Staging while the pipeline is running.
 
@@ -68,11 +67,18 @@ publication before Staging is cleaned.
 
 On failure, inspect `status`: it includes the staged and pending paths and an
 error. Staged data and pending uploads are intentionally retained. Do not
-manually delete the only remaining copy; automated retries, orphan cleanup and
-crash reconciliation are not yet implemented. A crash or uncertain rename
-response may leave a published item with a non-published ledger status; review
-both paths before taking action. Manual SMB changes are outside the automated
-append-only guarantee. Backups and Azure cost validation are separate work.
+manually delete the only remaining copy; automated retries and orphan cleanup
+are not yet implemented. At the start of the next run,
+the pipeline checks unresolved ledger entries against their final Cloud archive
+objects and marks a matching object published before cleaning up its verified
+Staging copy. If the final object cannot be verified, the local copy is retained.
+
+After each run, the SQLite ledger is copied to `_ledger/ledger.sqlite`, separate
+from media objects. Each refresh uploads and verifies a uniquely named candidate
+before replacing the prior backup. If refresh fails, the previous backup stays
+intact and the operation reports `backup_stale`; media processing is not halted.
+Manual SMB changes are outside the automated append-only guarantee. Validate
+actual Azure costs before provisioning recovery protection.
 
 ## Development
 
