@@ -53,6 +53,43 @@ def fake_exiftool(tmp_path: Path, item: Path, output: str, exit_code: int = 0) -
     return str(executable)
 
 
+def test_exiftool_failure_reports_sanitized_diagnostic_and_retains_inbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    media = inbox / "photo.jpg"
+    media.write_bytes(b"original")
+    cloud = FakeCloud()
+
+    def fail(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.CalledProcessError(
+            2,
+            "exiftool",
+            stderr=f"Error: invalid image - {media}\nSensitive second line",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fail)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"ExifTool failed with exit status 2: Error: invalid image - <media file>",
+    ) as error:
+        run_once(
+            Source("Phone-1", inbox),
+            media,
+            tmp_path / "staging",
+            tmp_path / "ledger.sqlite",
+            cloud,
+            ExifTool(),
+        )
+
+    assert str(media) not in str(error.value)
+    assert "\n" not in str(error.value)
+    assert media.read_bytes() == b"original"
+    assert not cloud.archive and not cloud.pending
+
+
 def test_archives_one_media_item_after_verification(tmp_path: Path) -> None:
     inbox = tmp_path / "inbox"
     inbox.mkdir()
@@ -235,7 +272,7 @@ def test_exiftool_tags_select_destination_and_ledger_source(
     ("output", "exit_code", "error"),
     [
         ("not JSON", 0, ValueError),
-        ("", 1, subprocess.CalledProcessError),
+        ("", 1, RuntimeError),
     ],
 )
 def test_exiftool_failure_retains_inbox_item_without_upload(
