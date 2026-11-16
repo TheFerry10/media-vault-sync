@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import subprocess
 import sys
 import tomllib
@@ -12,7 +13,9 @@ from pathlib import Path
 from azure.core.exceptions import AzureError
 
 from .exiftool import ExifTool
+from .locking import exclusive_lock
 from .pipeline import Source, list_failed_items, list_items, run_inbox, run_once
+from .poll import PollConfig, poll_once
 
 
 def main() -> int:
@@ -24,6 +27,7 @@ def main() -> int:
     ingest = commands.add_parser("run-once")
     ingest.add_argument("source")
     ingest.add_argument("item", help="Path relative to the Source Inbox")
+    commands.add_parser("poll")
     retry = commands.add_parser("retry")
     retry.add_argument("source")
     retry.add_argument("item", help="Path relative to the Source Inbox")
@@ -32,6 +36,7 @@ def main() -> int:
     commands.add_parser("review")
     args = parser.parse_args()
 
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
         with args.config.open("rb") as stream:
             config = tomllib.load(stream)
@@ -51,36 +56,57 @@ def main() -> int:
             cloud = AzureFiles(
                 azure["account"], azure["share"], Path(azure["credentials"])
             )
-            metadata = ExifTool()
-            if args.command == "process":
-                now = datetime.now(timezone.utc)
-                results = [
-                    result
-                    for source_id, inbox_path in config["sources"].items()
-                    for result in run_inbox(
-                        Source(source_id, Path(inbox_path)),
+            if args.command == "poll":
+                backup = Path(config.get("ledger_backup", f"{ledger}.backup"))
+                max_age = float(config.get("ledger_backup_max_age_hours", 24)) * 3600
+                summary = poll_once(
+                    PollConfig(
+                        {name: Path(path) for name, path in config["sources"].items()},
                         Path(config["staging"]),
                         ledger,
-                        cloud,
-                        metadata,
-                        now=now,
-                    )
-                ]
+                        backup,
+                        max_age,
+                    ),
+                    cloud,
+                )
+                print(json.dumps(asdict(summary)))
+            elif args.command == "process":
+                lock_path = ledger.with_suffix(ledger.suffix + ".lock")
+                with exclusive_lock(lock_path) as acquired:
+                    if not acquired:
+                        raise RuntimeError("Another pipeline run is already active")
+                    now = datetime.now(timezone.utc)
+                    results = [
+                        result
+                        for source_id, inbox_path in config["sources"].items()
+                        for result in run_inbox(
+                            Source(source_id, Path(inbox_path)),
+                            Path(config["staging"]),
+                            ledger,
+                            cloud,
+                            ExifTool(),
+                            now=now,
+                        )
+                    ]
                 print(json.dumps([asdict(result) for result in results], indent=2))
             else:
                 inbox = Path(config["sources"][args.source])
                 if Path(args.item).is_absolute():
                     raise ValueError("Item path must be relative to the Source Inbox")
-                result = run_once(
-                    Source(args.source, inbox),
-                    inbox / args.item,
-                    Path(config["staging"]),
-                    ledger,
-                    cloud,
-                    metadata,
-                    now=datetime.now(timezone.utc),
-                    retry=args.command == "retry",
-                )
+                lock_path = ledger.with_suffix(ledger.suffix + ".lock")
+                with exclusive_lock(lock_path) as acquired:
+                    if not acquired:
+                        raise RuntimeError("Another pipeline run is already active")
+                    result = run_once(
+                        Source(args.source, inbox),
+                        inbox / args.item,
+                        Path(config["staging"]),
+                        ledger,
+                        cloud,
+                        ExifTool(),
+                        now=datetime.now(timezone.utc),
+                        retry=args.command == "retry",
+                    )
                 print(json.dumps(asdict(result)))
         return 0
     except (

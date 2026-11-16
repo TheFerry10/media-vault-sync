@@ -1,9 +1,10 @@
 # Media Vault Sync
 
 Media Vault Sync archives completed media files from configured Inboxes to an
-SMB Azure Files share. It does not monitor Inboxes or detect stable files; only
-run it on files whose transfer into the Inbox has finished. Do not edit files in
-Staging while the pipeline is running.
+SMB Azure Files share. It supports individual runs, batch processing, and
+scheduled polling of stable Inbox files. Only process files whose transfer into
+the Inbox has finished. Do not edit files in Staging while the pipeline is
+running.
 
 ## Setup
 
@@ -25,6 +26,8 @@ Create a TOML configuration file outside the repository, using absolute paths:
 ```toml
 staging = "/home/you/media-staging"
 ledger = "/home/you/media-state/ledger.sqlite"
+ledger_backup = "/home/you/media-state/ledger.sqlite.backup"
+ledger_backup_max_age_hours = 24
 
 [sources]
 Phone-1 = "/home/you/media-inbox/phone-1"
@@ -44,6 +47,7 @@ Azure's no-replace rename API is not available on NFS shares.
 
 ```sh
 uv run media-vault-sync --config /path/to/config.toml run-once Phone-1 photo.jpg
+uv run media-vault-sync --config /path/to/config.toml poll
 uv run media-vault-sync --config /path/to/config.toml process
 uv run media-vault-sync --config /path/to/config.toml status
 uv run media-vault-sync --config /path/to/config.toml review
@@ -70,6 +74,33 @@ collision is resolved with a content-hash suffix rather than overwriting. After
 successful publication, the ledger records it before the Inbox and Staging
 copies are cleaned.
 
+## Automatic polling on Ubuntu
+
+Install the package as a user tool so systemd can invoke the executable:
+
+```sh
+uv tool install --from /path/to/media-vault-sync media-vault-sync
+mkdir -p ~/.config/systemd/user
+cp /path/to/media-vault-sync/systemd/user/media-vault-sync.{service,timer} \
+  ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now media-vault-sync.timer
+```
+
+The timer polls every 15 minutes. The poll command uses an exclusive local lock,
+so timer and manual polls cannot overlap. It records file size and nanosecond
+mtime in the ledger and only processes an unchanged file on its second
+consecutive poll. The ledger backup is refreshed if missing or older than the
+configured maximum age (24 hours by default).
+
+Run details and actionable errors are written to standard output/error, which
+the service sends to journald. Inspect them with
+`journalctl --user -u media-vault-sync.service`. Permanent or unknown stable
+items and stale ledger backups trigger a local desktop notification; transient
+failures trigger one after 24 hours. Notifications never include filenames,
+media contents, or metadata. Desktop notifications require an active local
+graphical session and `notify-send`.
+
 `process` attempts every eligible media file in all configured Inboxes; a
 failure on one file does not stop the rest. Transient transfer failures retry
 when `process` is run again after an increasing delay (15 minutes initially,
@@ -78,14 +109,13 @@ until explicitly retried with `retry`. Use `review` to see the latest failed
 items and their reasons; `status` shows the full ledger journal. Staged data and
 pending uploads are intentionally retained after failure. Do not manually
 delete the only remaining copy. A crash or uncertain rename response may leave
-a published item with a non-published ledger status; review both paths before
-taking action. Manual SMB changes are outside the automated append-only
-guarantee. Backups and Azure cost validation are separate work.
+a published item with a non-published ledger status.
 
 At the start of a run, the pipeline checks unresolved ledger entries against
 their final Cloud archive objects and marks a matching object published before
 cleaning up its verified Staging copy. If the final object cannot be verified,
-the local copy is retained.
+the local copy is retained. Manual SMB changes are outside the automated
+append-only guarantee.
 
 After each run, the SQLite ledger is copied to `_ledger/ledger.sqlite`, separate
 from media objects. Each refresh uploads and verifies a uniquely named candidate
