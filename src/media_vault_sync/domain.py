@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
@@ -37,6 +38,25 @@ MEDIA_EXTENSIONS = frozenset(
         ".m2ts",
     }
 )
+VIDEO_EXTENSIONS = frozenset(
+    {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".3gp", ".mts", ".m2ts"}
+)
+PHOTO_EXTENSIONS = MEDIA_EXTENSIONS - VIDEO_EXTENSIONS
+
+_WHATSAPP_TIMESTAMP = re.compile(
+    r"WhatsApp (?:Image|Video) "
+    r"(?P<date>\d{4}-\d{2}-\d{2}) at "
+    r"(?P<hour>\d{2})\.(?P<minute>\d{2})\.(?P<second>\d{2})",
+    re.IGNORECASE,
+)
+_WHATSAPP_DATE = re.compile(
+    r"(?:IMG|VID)-(?P<date>\d{4}\d{2}\d{2})-WA\d{4}(?: \(\d+\))?",
+    re.IGNORECASE,
+)
+_WHATSAPP_IMAGE_DATE = re.compile(
+    r"WhatsApp (?:Image|Video) (?P<date>\d{4}-\d{2}-\d{2})",
+    re.IGNORECASE,
+)
 
 
 class Status(StrEnum):
@@ -44,6 +64,14 @@ class Status(StrEnum):
     PENDING = "pending"
     FAILED = "failed"
     PUBLISHED = "published"
+
+
+class CaptureTimeSource(StrEnum):
+    DATETIME_ORIGINAL = "DateTimeOriginal"
+    MEDIA_CREATE_DATE = "MediaCreateDate"
+    CREATE_DATE = "CreateDate"
+    WHATSAPP_FILENAME = "WhatsApp filename"
+    FILESYSTEM_MTIME = "filesystem mtime"
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,7 +96,15 @@ class LedgerItem:
     pending_path: str
     status: Status
     error: str | None
-    content_hash: str | None
+    content_hash: str | bytes | None
+    capture_time: str | None
+    capture_time_source: CaptureTimeSource | None
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureTime:
+    value: datetime
+    source: CaptureTimeSource
 
 
 def sha256(chunks: Iterable[bytes]) -> bytes:
@@ -97,13 +133,100 @@ def capture_time(
     )
 
 
-def archive_destination(source_id: str, filename: str, capture_time: datetime) -> str:
+def parse_source_timestamp(value: str) -> datetime | None:
+    normalized = value.strip()
+    if len(normalized) >= 10 and normalized[4] == ":" and normalized[7] == ":":
+        normalized = f"{normalized[:4]}-{normalized[5:7]}-{normalized[8:]}"
+    if len(normalized) > 10 and normalized[10] == " ":
+        normalized = f"{normalized[:10]}T{normalized[11:]}"
+    try:
+        return datetime.fromisoformat(normalized).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def whatsapp_filename_time(filename: str) -> datetime | None:
+    stem = Path(filename).stem
+    match = _WHATSAPP_TIMESTAMP.fullmatch(stem)
+    if match is not None:
+        try:
+            return datetime.strptime(
+                f"{match['date']} {match['hour']}:{match['minute']}:{match['second']}",
+                "%Y-%m-%d %H:%M:%S",
+            )
+        except ValueError:
+            return None
+
+    match = _WHATSAPP_DATE.fullmatch(stem)
+    date_format = "%Y%m%d"
+    if match is None:
+        match = _WHATSAPP_IMAGE_DATE.fullmatch(stem)
+        date_format = "%Y-%m-%d"
+    if match is not None:
+        try:
+            return datetime.strptime(match["date"], date_format)
+        except ValueError:
+            return None
+    return None
+
+
+def select_capture_time(
+    filename: str, tags: dict[str, str], modified_at: datetime
+) -> CaptureTime:
+    extension = Path(filename).suffix.lower()
+    if extension in VIDEO_EXTENSIONS:
+        candidates = (
+            ("MediaCreateDate", CaptureTimeSource.MEDIA_CREATE_DATE),
+            ("CreateDate", CaptureTimeSource.CREATE_DATE),
+        )
+    elif extension in PHOTO_EXTENSIONS:
+        candidates = (
+            ("DateTimeOriginal", CaptureTimeSource.DATETIME_ORIGINAL),
+            ("CreateDate", CaptureTimeSource.CREATE_DATE),
+        )
+    else:
+        raise ValueError("Unsupported media extension")
+
+    for tag, source in candidates:
+        value = tags.get(tag)
+        if value is not None:
+            parsed = parse_source_timestamp(value)
+            if parsed is not None:
+                return CaptureTime(parsed, source)
+
+    filename_time = whatsapp_filename_time(filename)
+    if filename_time is not None:
+        return CaptureTime(filename_time, CaptureTimeSource.WHATSAPP_FILENAME)
+    return CaptureTime(modified_at, CaptureTimeSource.FILESYSTEM_MTIME)
+
+
+def archive_destination(
+    source_id: str,
+    filename: str,
+    capture_time: datetime,
+    content_hash: bytes | None = None,
+) -> str:
     if Path(filename).suffix.lower() not in MEDIA_EXTENSIONS:
         raise ValueError("Unsupported media extension")
     if any(ord(c) < 32 or c in '"*:<>?\\|' for c in filename):
         raise ValueError("Filename contains characters unsupported by Azure Files")
     source_hash = sha256([source_id.encode("utf-8")]).hex()[:12]
-    name = f"{capture_time:%Y%m%d_%H%M%S}_{source_hash}_{filename}"
+    prefix = f"{capture_time:%Y%m%d_%H%M%S}_{source_hash}_"
+    if content_hash is not None:
+        if len(content_hash) != 32:
+            raise ValueError("Content hash must be a SHA-256 digest")
+        suffix = f"_{content_hash.hex()}{Path(filename).suffix}"
+        stem = Path(filename).stem
+        max_stem_length = (
+            255
+            - len(prefix.encode("utf-16-le")) // 2
+            - len(suffix.encode("utf-16-le")) // 2
+        )
+        while len(stem.encode("utf-16-le")) // 2 > max_stem_length:
+            stem = stem[:-1]
+        name = f"{prefix}{stem}{suffix}"
+    else:
+        name = f"{prefix}{filename}"
     if len(name.encode("utf-16-le")) // 2 > 255:
         raise ValueError("Archive filename exceeds Azure Files' 255-character limit")
     return f"{capture_time:%Y/%Y-%m}/{name}"

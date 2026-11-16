@@ -14,6 +14,7 @@ from .domain import (
     Status,
     archive_destination,
     capture_time,
+    select_capture_time,
     sha256,
     validate_source_id,
 )
@@ -53,14 +54,16 @@ def _reconcile(db: Ledger, staging: Path, cloud: Cloud) -> None:
         staged = Path(item.staged_path)
         if item.status == Status.PUBLISHED and not staged.exists():
             continue
-        if item.content_hash is not None:
+        if isinstance(item.content_hash, bytes):
+            expected_hash = item.content_hash
+        elif item.content_hash is not None:
             try:
                 expected_hash = bytes.fromhex(item.content_hash)
             except ValueError:
                 continue
         elif _is_safe_stage(staged, staging):
             expected_hash = filesystem.file_hash(staged)
-            db.record_hash(item.id, expected_hash.hex())
+            db.record_hash(item.id, expected_hash)
         else:
             continue
         try:
@@ -110,30 +113,61 @@ def _refresh_backup(ledger: Path, cloud: Cloud) -> bool:
     return stale
 
 
+class Metadata(Protocol):
+    def extract(self, path: Path) -> dict[str, str]: ...
+
+
 def run_once(
-    source: Source, item: Path, staging: Path, ledger: Path, cloud: Cloud
+    source: Source,
+    item: Path,
+    staging: Path,
+    ledger: Path,
+    cloud: Cloud,
+    metadata: Metadata | None = None,
 ) -> Result:
     validate_source_id(source.id)
-    timestamp = capture_time(filesystem.modification_time(source, item), localtime)
-    destination = archive_destination(source.id, item.name, timestamp)
+    modified_at = capture_time(filesystem.modification_time(source, item), localtime)
+    tags = {} if metadata is None else metadata.extract(item)
+    selected_time = select_capture_time(item.name, tags, modified_at)
+    destination = archive_destination(source.id, item.name, selected_time.value)
     run_id = uuid.uuid4().hex
     pending = f"_pending/{run_id}/data"
     staged = filesystem.prepare_stage(staging, run_id, item.name)
     try:
         with Ledger(ledger) as db:
             _reconcile(db, staging, cloud)
-            db.start(run_id, source, destination, staged, pending)
+            db.start(
+                run_id,
+                source,
+                destination,
+                staged,
+                pending,
+                selected_time.value,
+                selected_time.source,
+            )
             try:
                 filesystem.stage_item(item, staged)
                 local_hash = filesystem.file_hash(staged)
-                db.record_hash(run_id, local_hash.hex())
+                db.record_hash(run_id, local_hash)
                 db.update(run_id, Status.PENDING)
-                cloud.upload(staged, pending)
-                if sha256(cloud.read_pending(pending)) != local_hash:
-                    raise ValueError("Pending upload verification failed")
-                if filesystem.file_hash(staged) != local_hash:
-                    raise ValueError("Staged file changed during upload")
-                cloud.publish(pending, destination)
+                duplicate_destination = db.find_published(source.id, local_hash)
+                if duplicate_destination is not None:
+                    destination = duplicate_destination
+                    db.set_destination(run_id, destination)
+                else:
+                    cloud.upload(staged, pending)
+                    if sha256(cloud.read_pending(pending)) != local_hash:
+                        raise ValueError("Pending upload verification failed")
+                    if filesystem.file_hash(staged) != local_hash:
+                        raise ValueError("Staged file changed during upload")
+                    try:
+                        cloud.publish(pending, destination)
+                    except FileExistsError:
+                        destination = archive_destination(
+                            source.id, item.name, selected_time.value, local_hash
+                        )
+                        db.set_destination(run_id, destination)
+                        cloud.publish(pending, destination)
             except Exception as exc:
                 db.update(run_id, Status.FAILED, str(exc))
                 raise

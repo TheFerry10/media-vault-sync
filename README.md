@@ -1,15 +1,15 @@
 # Media Vault Sync
 
 This initial slice manually archives one completed media file at a time to an
-SMB Azure Files share. It does not yet monitor Inboxes, detect stable files,
-retry failures, deduplicate, resolve metadata dates, or recover after crashes.
+SMB Azure Files share. It does not yet monitor Inboxes or detect stable files.
 Only run it on a file whose transfer into the Inbox has finished. Do not edit
 files in Staging while the pipeline is running.
 
 ## Setup
 
-Install Python 3.12+, [uv](https://docs.astral.sh/uv/) and rclone 1.65 or newer
-with the Azure Files backend. Run `uv sync --extra dev` in this directory.
+Install Python 3.12+, [uv](https://docs.astral.sh/uv/), ExifTool, and rclone
+1.65 or newer with the Azure Files backend. Run `uv sync --extra dev` in this
+directory.
 
 Create a service principal with Azure Files data permissions including backup
 semantics (for example, Storage File Data Privileged Contributor) on the share.
@@ -48,15 +48,22 @@ uv run media-vault-sync --config /path/to/config.toml status
 ```
 
 The item path is relative to the selected Inbox. Supported photo/video
-extensions are listed in the pipeline; other files remain untouched. This
-slice uses the file's modification time in the host's local timezone and
-creates `YYYY/YYYY-MM/<timestamp>_<source-hash>_<original-name>`.
+extensions are listed in the pipeline; other files remain untouched. Capture
+time prefers photo `DateTimeOriginal` / `CreateDate` tags and video
+`MediaCreateDate` / `CreateDate` tags. Invalid or missing metadata falls back to
+recognized WhatsApp filename dates and then the file's modification time in the
+host's local timezone. Source timestamps are used as recorded without timezone
+conversion; WhatsApp date-only filenames use `000000` for the unknown time. The
+selected timestamp and source are recorded in the ledger. The pipeline creates
+`YYYY/YYYY-MM/<timestamp>_<source-hash>_<original-name>`.
 
 The item moves to a unique local Staging directory. rclone uploads it to a
 separate `_pending/` path, then reads it back for SHA-256 verification. Azure
 Files performs publication using an atomic server-side rename with replacement
-disabled. A destination conflict fails rather than overwriting. The ledger
-records publication before Staging is cleaned.
+disabled. Re-imports are deduplicated only within the same Source after the
+ledger confirms the earlier item was published. A destination conflict is
+resolved with a content-hash suffix rather than overwriting. The ledger records
+publication before Staging is cleaned.
 
 On failure, inspect `status`: it includes the staged and pending paths and an
 error. Staged data and pending uploads are intentionally retained. Do not
