@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import subprocess
 import time
 from collections.abc import Iterator
 from datetime import datetime
@@ -8,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from media_vault_sync.exiftool import ExifTool
 from media_vault_sync.pipeline import Source, list_items, run_once
 
 
@@ -34,6 +36,21 @@ class FakeMetadata:
 
     def extract(self, path: Path) -> dict[str, str]:
         return self.tags
+
+
+def fake_exiftool(tmp_path: Path, item: Path, output: str, exit_code: int = 0) -> str:
+    executable = tmp_path / "exiftool"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "assert sys.argv[1:-1] == "
+        "['-json', '-DateTimeOriginal', '-MediaCreateDate', '-CreateDate', '--']\n"
+        f"assert sys.argv[-1] == {str(item)!r}\n"
+        f"sys.stdout.write({output!r})\n"
+        f"sys.exit({exit_code})\n"
+    )
+    executable.chmod(0o755)
+    return str(executable)
 
 
 def test_archives_one_media_item_after_verification(tmp_path: Path) -> None:
@@ -178,6 +195,75 @@ def test_capture_time_selection_is_recorded_at_pipeline_boundary(
     assert item.capture_time == expected_time.isoformat()
     assert item.capture_time_source == expected_source
     assert result.destination.startswith(f"{expected_time:%Y/%Y-%m}/")
+
+
+def test_exiftool_tags_select_destination_and_ledger_source(
+    tmp_path: Path,
+) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    media = inbox / "photo.jpg"
+    media.write_bytes(b"media")
+    modified_timestamp = datetime(2024, 2, 1, 12).timestamp()
+    os.utime(media, (modified_timestamp, modified_timestamp))
+    capture_time = datetime(2022, 3, 4, 5, 6, 7)
+    executable = fake_exiftool(
+        tmp_path,
+        media,
+        '[{"DateTimeOriginal":"2022:03:04 05:06:07"}]',
+    )
+    ledger = tmp_path / "ledger.sqlite"
+    cloud = FakeCloud()
+
+    result = run_once(
+        Source("Phone-1", inbox),
+        media,
+        tmp_path / "staging",
+        ledger,
+        cloud,
+        ExifTool(executable),
+    )
+
+    item = list_items(ledger)[0]
+    assert result.destination.startswith("2022/2022-03/20220304_050607_")
+    assert item.capture_time == capture_time.isoformat()
+    assert item.capture_time_source == "DateTimeOriginal"
+    assert cloud.archive[result.destination] == b"media"
+
+
+@pytest.mark.parametrize(
+    ("output", "exit_code", "error"),
+    [
+        ("not JSON", 0, ValueError),
+        ("", 1, subprocess.CalledProcessError),
+    ],
+)
+def test_exiftool_failure_retains_inbox_item_without_upload(
+    tmp_path: Path,
+    output: str,
+    exit_code: int,
+    error: type[Exception],
+) -> None:
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    media = inbox / "photo.jpg"
+    media.write_bytes(b"media")
+    executable = fake_exiftool(tmp_path, media, output, exit_code)
+    cloud = FakeCloud()
+
+    with pytest.raises(error):
+        run_once(
+            Source("Phone-1", inbox),
+            media,
+            tmp_path / "staging",
+            tmp_path / "ledger.sqlite",
+            cloud,
+            ExifTool(executable),
+        )
+
+    assert media.read_bytes() == b"media"
+    assert cloud.pending == {}
+    assert cloud.archive == {}
 
 
 def test_legacy_ledger_remains_readable(tmp_path: Path) -> None:
