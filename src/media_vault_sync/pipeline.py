@@ -18,6 +18,7 @@ from .domain import (
     TransientTransferError,
     archive_destination,
     capture_time,
+    select_capture_time,
     sha256,
     validate_source_id,
 )
@@ -43,6 +44,10 @@ class Cloud(Protocol):
     def read_pending(self, pending: str) -> Iterator[bytes]: ...
 
     def publish(self, pending: str, destination: str) -> None: ...
+
+
+class Metadata(Protocol):
+    def extract(self, path: Path) -> dict[str, str]: ...
 
 
 T = TypeVar("T")
@@ -75,12 +80,13 @@ def run_once(
     staging: Path,
     ledger: Path,
     cloud: Cloud,
+    metadata: Metadata | None = None,
     *,
     now: datetime | None = None,
     retry: bool = False,
 ) -> Result:
     validate_source_id(source.id)
-    filesystem.modification_time(source, item)
+    modified_timestamp = filesystem.modification_time(source, item)
     source_path = item.resolve().relative_to(source.inbox.resolve()).as_posix()
     current_time = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     with Ledger(ledger) as db:
@@ -101,28 +107,54 @@ def run_once(
             and not retry
             else 1
         )
+        modified_at = capture_time(modified_timestamp, localtime)
+        tags = metadata.extract(item) if metadata is not None else {}
+        selected_time = select_capture_time(item.name, tags, modified_at)
+        destination = archive_destination(source.id, item.name, selected_time.value)
         run_id = uuid.uuid4().hex
         pending = f"_pending/{run_id}/data"
         staged = filesystem.prepare_stage(staging, run_id, item.name)
-        db.start(run_id, source, source_path, staged, pending, attempt_count)
+        db.start(
+            run_id,
+            source,
+            source_path,
+            destination,
+            staged,
+            pending,
+            selected_time.value,
+            selected_time.source,
+            attempt_count,
+        )
         try:
-            timestamp = capture_time(
-                filesystem.modification_time(source, item), localtime
-            )
-            destination = archive_destination(source.id, item.name, timestamp)
-            db.set_destination(run_id, destination)
             filesystem.stage_item(item, staged)
             db.update(run_id, Status.PENDING)
             local_hash = filesystem.file_hash(staged)
-            _transfer(lambda: cloud.upload(staged, pending), "Upload")
-            pending_hash = sha256(
-                _transfer(lambda: cloud.read_pending(pending), "Read-back")
-            )
-            if pending_hash != local_hash:
-                raise TransientTransferError("Pending upload verification failed")
-            if filesystem.file_hash(staged) != local_hash:
-                raise ValueError("Staged file changed during upload")
-            _transfer(lambda: cloud.publish(pending, destination), "Publication")
+            db.set_content_hash(run_id, local_hash)
+            duplicate_destination = db.find_published(source.id, local_hash)
+            if duplicate_destination is not None:
+                destination = duplicate_destination
+                db.set_destination(run_id, destination)
+            else:
+                _transfer(lambda: cloud.upload(staged, pending), "Upload")
+                pending_hash = sha256(
+                    _transfer(lambda: cloud.read_pending(pending), "Read-back")
+                )
+                if pending_hash != local_hash:
+                    raise TransientTransferError("Pending upload verification failed")
+                if filesystem.file_hash(staged) != local_hash:
+                    raise ValueError("Staged file changed during upload")
+                try:
+                    _transfer(
+                        lambda: cloud.publish(pending, destination), "Publication"
+                    )
+                except FileExistsError:
+                    destination = archive_destination(
+                        source.id, item.name, selected_time.value, local_hash
+                    )
+                    db.set_destination(run_id, destination)
+                    _transfer(
+                        lambda: cloud.publish(pending, destination), "Publication"
+                    )
         except Exception as exc:
             transient = isinstance(exc, TransientTransferError)
             retry_at = (
@@ -154,6 +186,7 @@ def run_inbox(
     staging: Path,
     ledger: Path,
     cloud: Cloud,
+    metadata: Metadata | None = None,
     *,
     now: datetime | None = None,
 ) -> list[Result]:
@@ -166,7 +199,17 @@ def run_inbox(
         ):
             continue
         try:
-            results.append(run_once(source, item, staging, ledger, cloud, now=now))
+            results.append(
+                run_once(
+                    source,
+                    item,
+                    staging,
+                    ledger,
+                    cloud,
+                    metadata,
+                    now=now,
+                )
+            )
         except Exception as exc:
             results.append(Result(Status.FAILED, "", _error_summary(exc)))
     return results

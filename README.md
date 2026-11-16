@@ -7,8 +7,9 @@ Staging while the pipeline is running.
 
 ## Setup
 
-Install Python 3.12+, [uv](https://docs.astral.sh/uv/) and rclone 1.65 or newer
-with the Azure Files backend. Run `uv sync --extra dev` in this directory.
+Install Python 3.12+, [uv](https://docs.astral.sh/uv/), ExifTool, and rclone
+1.65 or newer with the Azure Files backend. Run `uv sync --extra dev` in this
+directory.
 
 Create a service principal with Azure Files data permissions including backup
 semantics (for example, Storage File Data Privileged Contributor) on the share.
@@ -50,17 +51,24 @@ uv run media-vault-sync --config /path/to/config.toml retry Phone-1 photo.jpg
 ```
 
 The item path is relative to the selected Inbox. Supported photo/video
-extensions are listed in the pipeline; other files remain untouched. This
-slice uses the file's modification time in the host's local timezone and
-creates `YYYY/YYYY-MM/<timestamp>_<source-hash>_<original-name>`.
+extensions are listed in the pipeline; other files remain untouched. Capture
+time prefers photo `DateTimeOriginal` / `CreateDate` tags and video
+`MediaCreateDate` / `CreateDate` tags. Invalid or missing metadata falls back to
+recognized WhatsApp filename dates and then the file's modification time in the
+host's local timezone. Source timestamps are used as recorded without timezone
+conversion; WhatsApp date-only filenames use `000000` for the unknown time. The
+selected timestamp and source are recorded in the ledger. The pipeline creates
+`YYYY/YYYY-MM/<timestamp>_<source-hash>_<original-name>`.
 
 The item is copied to a unique local Staging directory, leaving the Inbox copy
 in place until publication is verified and recorded. rclone uploads the staged
 copy to a separate `_pending/` path, then reads it back for SHA-256 verification.
 Azure Files performs publication using an atomic server-side rename with
-replacement disabled. A destination conflict fails rather than overwriting.
-After successful publication, the ledger records it before the Inbox and
-Staging copies are cleaned.
+replacement disabled. Re-imports are deduplicated only within the same Source
+after the ledger confirms the earlier item was published. A destination
+collision is resolved with a content-hash suffix rather than overwriting. After
+successful publication, the ledger records it before the Inbox and Staging
+copies are cleaned.
 
 `process` attempts every eligible media file in all configured Inboxes; a
 failure on one file does not stop the rest. Transient transfer failures retry

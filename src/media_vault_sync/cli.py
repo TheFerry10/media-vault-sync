@@ -11,6 +11,7 @@ from pathlib import Path
 
 from azure.core.exceptions import AzureError
 
+from .exiftool import ExifTool
 from .pipeline import Source, list_failed_items, list_items, run_inbox, run_once
 
 
@@ -50,6 +51,7 @@ def main() -> int:
             cloud = AzureFiles(
                 azure["account"], azure["share"], Path(azure["credentials"])
             )
+            metadata = ExifTool()
             if args.command == "process":
                 now = datetime.now(timezone.utc)
                 results = [
@@ -60,6 +62,7 @@ def main() -> int:
                         Path(config["staging"]),
                         ledger,
                         cloud,
+                        metadata,
                         now=now,
                     )
                 ]
@@ -74,6 +77,7 @@ def main() -> int:
                     Path(config["staging"]),
                     ledger,
                     cloud,
+                    metadata,
                     now=datetime.now(timezone.utc),
                     retry=args.command == "retry",
                 )
