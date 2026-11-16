@@ -1,14 +1,15 @@
 # Media Vault Sync
 
-Media Vault Sync archives media to an SMB Azure Files share. It can publish one
-manually selected file or poll configured Inboxes for stable files. A file must
-have the same size and modification time in two consecutive polls before it is
-processed. Stable files that remain in an Inbox are retried by later polls.
+Media Vault Sync archives media to an SMB Azure Files share. It can publish
+individual files or monitor Inboxes for stable files.
+Only run it on a file whose transfer into the Inbox has finished. Do not edit
+files in Staging while the pipeline is running.
 
 ## Setup
 
-Install Python 3.12+, [uv](https://docs.astral.sh/uv/) and rclone 1.65 or newer
-with the Azure Files backend. Run `uv sync --extra dev` in this directory.
+Install Python 3.12+, [uv](https://docs.astral.sh/uv/), ExifTool, and rclone
+1.65 or newer with the Azure Files backend. Run `uv sync --extra dev` in this
+directory.
 
 Create a service principal with Azure Files data permissions including backup
 semantics (for example, Storage File Data Privileged Contributor) on the share.
@@ -50,15 +51,22 @@ uv run media-vault-sync --config /path/to/config.toml status
 ```
 
 The item path is relative to the selected Inbox. Supported photo/video
-extensions are listed in the pipeline; other files remain untouched. This
-slice uses the file's modification time in the host's local timezone and
-creates `YYYY/YYYY-MM/<timestamp>_<source-hash>_<original-name>`.
+extensions are listed in the pipeline; other files remain untouched. Capture
+time prefers photo `DateTimeOriginal` / `CreateDate` tags and video
+`MediaCreateDate` / `CreateDate` tags. Invalid or missing metadata falls back to
+recognized WhatsApp filename dates and then the file's modification time in the
+host's local timezone. Source timestamps are used as recorded without timezone
+conversion; WhatsApp date-only filenames use `000000` for the unknown time. The
+selected timestamp and source are recorded in the ledger. The pipeline creates
+`YYYY/YYYY-MM/<timestamp>_<source-hash>_<original-name>`.
 
 The item moves to a unique local Staging directory. rclone uploads it to a
 separate `_pending/` path, then reads it back for SHA-256 verification. Azure
 Files performs publication using an atomic server-side rename with replacement
-disabled. A destination conflict fails rather than overwriting. The ledger
-records publication before Staging is cleaned.
+disabled. Re-imports are deduplicated only within the same Source after the
+ledger confirms the earlier item was published. A destination conflict is
+resolved with a content-hash suffix rather than overwriting. The ledger records
+publication before Staging is cleaned.
 
 ## Automatic polling on Ubuntu
 
@@ -89,11 +97,20 @@ graphical session and `notify-send`.
 
 On failure, inspect `status`: it includes the staged and pending paths and an
 error. Staged data and pending uploads are intentionally retained. Do not
-manually delete the only remaining copy; automated retries, orphan cleanup and
-crash reconciliation are not yet implemented. A crash or uncertain rename
-response may leave a published item with a non-published ledger status; review
-both paths before taking action. Manual SMB changes are outside the automated
-append-only guarantee. Azure cost validation is separate work.
+manually delete the only remaining copy; automated orphan cleanup is not yet
+implemented. A crash or uncertain rename response may leave a published item
+with a non-published ledger status. At the start of the next run, the pipeline
+checks unresolved ledger entries against their final Cloud archive objects and
+marks a matching object published before cleaning up its verified Staging copy.
+If the final object cannot be verified, the local copy is retained. Manual SMB
+changes are outside the automated append-only guarantee.
+
+After each run, the SQLite ledger is copied to `_ledger/ledger.sqlite`, separate
+from media objects. Each refresh uploads and verifies a uniquely named candidate
+before replacing the prior backup. If refresh fails, the previous backup stays
+intact and the operation reports `backup_stale`; media processing is not halted.
+Manual SMB changes are outside the automated append-only guarantee. Validate
+actual Azure costs before provisioning recovery protection.
 
 ## Development
 

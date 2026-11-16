@@ -88,9 +88,15 @@ class AzureFiles:
         )
 
     def read_pending(self, pending: str) -> Iterator[bytes]:
+        yield from self._read(pending)
+
+    def read_archive(self, destination: str) -> Iterator[bytes]:
+        yield from self._read(destination)
+
+    def _read(self, path: str) -> Iterator[bytes]:
         with tempfile.TemporaryFile() as errors:
             with subprocess.Popen(
-                self._command("cat", f":azurefiles:{pending}"),
+                self._command("cat", f":azurefiles:{path}"),
                 env=self.env,
                 stdout=subprocess.PIPE,
                 stderr=errors,
@@ -105,6 +111,12 @@ class AzureFiles:
                     )
 
     def publish(self, pending: str, destination: str) -> None:
+        self._rename(pending, destination, overwrite=False)
+
+    def publish_backup(self, pending: str, destination: str) -> None:
+        self._rename(pending, destination, overwrite=True)
+
+    def _rename(self, pending: str, destination: str, *, overwrite: bool) -> None:
         directory = destination.rsplit("/", 1)[0]
         subprocess.run(
             self._command("mkdir", f":azurefiles:{directory}"),
@@ -118,4 +130,4 @@ class AzureFiles:
             credential=self.credential,
             token_intent="backup",
         ) as client:
-            client.rename_file(destination, overwrite=False)
+            client.rename_file(destination, overwrite=overwrite)

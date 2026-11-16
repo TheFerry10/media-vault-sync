@@ -26,6 +26,13 @@ class FakeCloud:
     def publish(self, pending: str, destination: str) -> None:
         raise AssertionError("cloud should not be called by the fake runner")
 
+    def read_archive(self, destination: str) -> Iterator[bytes]:
+        raise AssertionError("cloud should not be called by the fake runner")
+        yield b""
+
+    def publish_backup(self, pending: str, destination: str) -> None:
+        raise AssertionError("cloud should not be called by the fake runner")
+
 
 def _config(tmp_path: Path, *, backup_max_age: float = 10**12) -> PollConfig:
     inbox = tmp_path / "inbox"

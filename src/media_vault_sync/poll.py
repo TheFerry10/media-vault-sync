@@ -13,6 +13,7 @@ from pathlib import Path
 from azure.core.exceptions import AzureError, ResourceExistsError
 
 from .domain import MEDIA_EXTENSIONS, Result, Source
+from .exiftool import ExifTool
 from .ledger import Ledger, backup_ledger
 from .locking import exclusive_lock
 from .pipeline import Cloud, run_once
@@ -54,6 +55,12 @@ class PollSummary:
 Notifier = Callable[[str, str], bool]
 Clock = Callable[[], float]
 Runner = Callable[[Source, Path, Path, Path, Cloud], Result]
+
+
+def _run_once(
+    source: Source, item: Path, staging: Path, ledger: Path, cloud: Cloud
+) -> Result:
+    return run_once(source, item, staging, ledger, cloud, ExifTool())
 
 
 def notify_desktop(title: str, message: str) -> bool:
@@ -118,7 +125,7 @@ def poll_once(
     cloud: Cloud,
     notifier: Notifier = notify_desktop,
     clock: Clock = time.time,
-    runner: Runner = run_once,
+    runner: Runner = _run_once,
 ) -> PollSummary:
     lock_path = config.ledger.with_suffix(config.ledger.suffix + ".lock")
     with exclusive_lock(lock_path) as acquired:

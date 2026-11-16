@@ -11,6 +11,7 @@ from pathlib import Path
 
 from azure.core.exceptions import AzureError
 
+from .exiftool import ExifTool
 from .locking import exclusive_lock
 from .pipeline import Source, list_items, run_once
 from .poll import PollConfig, poll_once
@@ -71,6 +72,7 @@ def main() -> int:
                         Path(config["staging"]),
                         ledger,
                         cloud,
+                        ExifTool(),
                     )
                 print(json.dumps(asdict(result)))
         return 0
